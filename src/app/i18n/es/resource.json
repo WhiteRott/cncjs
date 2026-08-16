@@ -646,5 +646,21 @@
   "End Z: {{value}} {{- units}}": "Z final: {{value}} {{- units}}",
   "None": "Ninguno",
   "Probe Length": "",
-  "Probe Length is how far the touch probe's contact point sits below the tool tip. It is added to Touch Plate Height when computing the Z offset.": ""
+  "Probe Length is how far the touch probe's contact point sits below the tool tip. It is added to Touch Plate Height when computing the Z offset.": "",
+  "Tool Library Widget": "",
+  "This widget manages a library of tools (number, diameter, length, and notes).": "",
+  "New Tool": "",
+  "e.g. Endmill, Ball Nose, Drill": "",
+  "Diameter (mm)": "",
+  "Flutes": "",
+  "Flute Length (mm)": "",
+  "Overall Length (mm)": "",
+  "Notes": "",
+  "Edit Tool": "",
+  "Delete Tool": "",
+  "Are you sure you want to delete this tool?": "",
+  "Tool Library": "",
+  "#": "",
+  "Diameter": "",
+  "No tools": ""
 }
