@@ -643,5 +643,7 @@
   "Clearance Z: {{value}} {{- units}}": "Güvenlik Z: {{value}} {{- units}}",
   "Start Z: {{value}} {{- units}}": "Başlangıç Z: {{value}} {{- units}}",
   "End Z: {{value}} {{- units}}": "Bitiş Z: {{value}} {{- units}}",
-  "None": "Yok"
+  "None": "Yok",
+  "Probe Length": "",
+  "Probe Length is how far the touch probe's contact point sits below the tool tip. It is added to Touch Plate Height when computing the Z offset.": ""
 }
