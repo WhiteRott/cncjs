@@ -10,6 +10,7 @@ import * as macros from './api.macros';
 import * as mdi from './api.mdi';
 import * as users from './api.users';
 import * as tool from './api.tool';
+import * as toolLibrary from './api.toolLibrary';
 
 export {
   version,
@@ -24,4 +25,5 @@ export {
   mdi,
   users,
   tool,
+  toolLibrary,
 };
