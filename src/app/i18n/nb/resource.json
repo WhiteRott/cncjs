@@ -134,7 +134,6 @@
   "This widget allows you control laser intensity and turn the laser on/off.": "Denne widgeten lar deg styre laserstyrke og skru laseren av/på.",
   "Macro Widget": "Makro-widget",
   "This widget can use macros to automate routine tasks.": "Denne widgeten kan bruke makroer for å automatisere rutineoppgaver.",
-  "Probe Widget": "Sonde-widget",
   "This widget helps you use a touch plate to set your Z zero offset.": "Denne widgeten lar deg bruke en trykkplate for å sette Z-nullpunktoffset.",
   "Spindle Widget": "Spindel-widget",
   "This widget provides the spindle control.": "Denne widgeten gir spindel-kontroll.",
@@ -706,5 +705,7 @@
   "s": "",
   "Pause after backing off, before the slow touch, to let vibration from the fast touch settle out.": "",
   "Probe: TOUCHING": "",
-  "Probe: clear": ""
+  "Probe: clear": "",
+  "Zero Probe Widget": "",
+  "Zero Probe": ""
 }

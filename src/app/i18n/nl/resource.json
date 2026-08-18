@@ -134,7 +134,6 @@
   "This widget allows you control laser intensity and turn the laser on/off.": "Deze widget staat u toe de laserintensiteit te controleren en de laser aan en uit te zetten.",
   "Macro Widget": "Macro Widget",
   "This widget can use macros to automate routine tasks.": "Deze widget kan macro’s gebruiken om routinetaken te automatiseren.",
-  "Probe Widget": "Uitpijl Widget",
   "This widget helps you use a touch plate to set your Z zero offset.": "Deze widget helpt u om met een aanraakplaat uw Z offset op nul uit te lijnen.",
   "Spindle Widget": "Spindel Widget",
   "This widget provides the spindle control.": "Deze widget zorgt voor de spindel bediening.",
@@ -706,5 +705,7 @@
   "s": "",
   "Pause after backing off, before the slow touch, to let vibration from the fast touch settle out.": "",
   "Probe: TOUCHING": "",
-  "Probe: clear": ""
+  "Probe: clear": "",
+  "Zero Probe Widget": "",
+  "Zero Probe": ""
 }

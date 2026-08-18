@@ -134,7 +134,6 @@
   "This widget allows you control laser intensity and turn the laser on/off.": "Este módulo permite controlar a intensidade do laser e ligá-lo/desligá-lo.",
   "Macro Widget": "Módulo Macro",
   "This widget can use macros to automate routine tasks.": "Este módulo pode usar macros para automatizar tarefas de rotina.",
-  "Probe Widget": "Módulo de Sonda",
   "This widget helps you use a touch plate to set your Z zero offset.": "Este módulo ajuda a usar uma placa de toque para definir o offset do zero do Z.",
   "Spindle Widget": "Módulo de Spindle",
   "This widget provides the spindle control.": "Este módulo fornece o controle do spindle.",
@@ -707,5 +706,7 @@
   "s": "",
   "Pause after backing off, before the slow touch, to let vibration from the fast touch settle out.": "",
   "Probe: TOUCHING": "",
-  "Probe: clear": ""
+  "Probe: clear": "",
+  "Zero Probe Widget": "",
+  "Zero Probe": ""
 }

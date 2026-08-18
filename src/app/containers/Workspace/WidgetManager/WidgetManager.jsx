@@ -101,7 +101,7 @@ class WidgetManager extends PureComponent {
       },
       {
         id: 'probe',
-        caption: i18n._('Probe Widget'),
+        caption: i18n._('Zero Probe Widget'),
         details: i18n._('This widget helps you use a touch plate to set your Z zero offset.'),
         visible: true,
         disabled: false

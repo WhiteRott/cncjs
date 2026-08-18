@@ -146,7 +146,6 @@
   "This widget allows you control laser intensity and turn the laser on/off.": "Віджет дозволяє контролювати інтенсивність лазера та вмикати/вимикати лазер.",
   "Macro Widget": "Віджет макросів",
   "This widget can use macros to automate routine tasks.": "Віджет може використовувати макроси для автоматизації рутинних завдань.",
-  "Probe Widget": "Віджет зонда",
   "This widget helps you use a touch plate to set your Z zero offset.": "Цей віджет допомагає використовувати контактну пластину для установки нульового зсуву по осі Z.",
   "Spindle Widget": "Віджет шпинделя",
   "This widget provides the spindle control.": "Віджет забезпечує керування шпинделем.",
@@ -708,5 +707,7 @@
   "s": "",
   "Pause after backing off, before the slow touch, to let vibration from the fast touch settle out.": "",
   "Probe: TOUCHING": "",
-  "Probe: clear": ""
+  "Probe: clear": "",
+  "Zero Probe Widget": "",
+  "Zero Probe": ""
 }

@@ -134,7 +134,6 @@
   "This widget allows you control laser intensity and turn the laser on/off.": "该组件可以让你控制激光强度和激光开关。",
   "Macro Widget": "宏组件",
   "This widget can use macros to automate routine tasks.": "此组件可使用宏来自动执行日常任务。",
-  "Probe Widget": "探针组件",
   "This widget helps you use a touch plate to set your Z zero offset.": "此组件可协助您使用对刀仪去设置Z轴原点。",
   "Spindle Widget": "主轴组件",
   "This widget provides the spindle control.": "此组件提供主轴相关的控制",
@@ -705,5 +704,7 @@
   "s": "",
   "Pause after backing off, before the slow touch, to let vibration from the fast touch settle out.": "",
   "Probe: TOUCHING": "",
-  "Probe: clear": ""
+  "Probe: clear": "",
+  "Zero Probe Widget": "",
+  "Zero Probe": ""
 }
