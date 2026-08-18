@@ -8,6 +8,8 @@ import fsp from 'fs/promises';
 import * as gcodeParser from 'gcode-parser';
 import _ from 'lodash';
 import * as autolevel from '../../lib/autolevel';
+import * as edgeprobe from '../../lib/edgeprobe';
+import * as probecycles from '../../lib/probecycles';
 import EventTrigger from '../../lib/EventTrigger';
 import Feeder from '../../lib/Feeder';
 import MessageSlot from '../../lib/MessageSlot';
@@ -152,6 +154,61 @@ class GrblController {
       probePoints: [],
 
       // The probe configuration
+      config: null,
+    };
+
+    // Edge Probe - multi-point line/skew probe state tracking
+    edgeProbeState = {
+      // The probed positions in the form of [{x, y, z}, ...]
+      probedPositions: [],
+
+      // The probe points in the form of [{x, y}, ...]
+      probePoints: [],
+
+      // Which axis the probe points are spaced along, and which axis is
+      // probed (perpendicular) at each point
+      lineAxis: null,
+      probeAxis: null,
+
+      // The line fit computed once all points are probed:
+      // { slope, intercept, angleRad, angleDeg }
+      result: null,
+
+      // The probe configuration
+      config: null,
+    };
+
+    // Corner Probe - two-edge intersection probe state tracking
+    cornerProbeState = {
+      probedPositions: [],
+      probePoints: [],
+      // { x, y } intersection of the two probed edges
+      result: null,
+      config: null,
+    };
+
+    // Circle Probe - shared by Bore (inside a hole) and Boss (outside a
+    // post) probes; same N-point circle fit, opposite approach direction
+    circleProbeState = {
+      probedPositions: [],
+      probePoints: [],
+      // 'bore' | 'boss'
+      mode: null,
+      // { centerX, centerY, radius, diameter }
+      result: null,
+      config: null,
+    };
+
+    // Rectangle Probe - shared by Rectangular Pocket (inside a cavity) and
+    // Rectangular Solid (outside a block) probes; same 4-wall fit,
+    // opposite approach direction
+    rectProbeState = {
+      probedPositions: [],
+      probePoints: [],
+      // 'pocket' | 'solid'
+      mode: null,
+      // { centerX, centerY, width, length }
+      result: null,
       config: null,
     };
 
@@ -799,6 +856,92 @@ class GrblController {
                 log.info('[autolevel] Probing completed');
               }
             }
+
+            // Track probe data if an edge-probe cycle is active
+            if (this.edgeProbeState.probePoints.length > 0 && this.edgeProbeState.probedPositions.length < this.edgeProbeState.probePoints.length) {
+              const newProbedPositions = [...this.edgeProbeState.probedPositions, probedPos];
+              const isCompleted = newProbedPositions.length >= this.edgeProbeState.probePoints.length;
+
+              this.edgeProbeState.probedPositions = newProbedPositions;
+
+              log.debug(`[edgeprobe] Probed ${newProbedPositions.length}/${this.edgeProbeState.probePoints.length}: posX=${probedPos.x.toFixed(3)}, posY=${probedPos.y.toFixed(3)}, posZ=${probedPos.z.toFixed(3)}`);
+
+              this.emit('edgeprobe:update', {
+                current: newProbedPositions.length,
+                total: this.edgeProbeState.probePoints.length,
+                probedPos: { ...probedPos },
+              });
+
+              if (isCompleted) {
+                const { lineAxis, probeAxis } = this.edgeProbeState;
+                const pairs = newProbedPositions.map((p) => [p[lineAxis], p[probeAxis]]);
+                const fit = edgeprobe.fitLine(pairs);
+
+                this.edgeProbeState.result = fit;
+
+                this.emit('edgeprobe:complete', {
+                  positions: newProbedPositions,
+                  fit,
+                });
+                log.info('[edgeprobe] Probing completed:', fit);
+              }
+            }
+
+            // Corner Probe: two edges, 2+ points each. Fit a line through
+            // each edge's contacts (edgeprobe.fitLine), then intersect the
+            // two lines -- doesn't assume a perfect 90° corner.
+            if (this.trackProbeResult(this.cornerProbeState, probedPos, 'cornerprobe')) {
+              const tags = this.cornerProbeState.probePoints;
+              const positions = this.cornerProbeState.probedPositions;
+
+              const xPairs = positions
+                .filter((p, i) => tags[i].edge === 'x')
+                .map((p) => [p.y, p.x]); // independent=y, dependent=x
+              const yPairs = positions
+                .filter((p, i) => tags[i].edge === 'y')
+                .map((p) => [p.x, p.y]); // independent=x, dependent=y
+
+              const xLine = edgeprobe.fitLine(xPairs);
+              const yLine = edgeprobe.fitLine(yPairs);
+              const result = probecycles.intersectLines(xLine, yLine);
+
+              this.cornerProbeState.result = result;
+              this.emit('cornerprobe:complete', {
+                positions,
+                xLine,
+                yLine,
+                result,
+              });
+              log.info('[cornerprobe] Probing completed:', result);
+            }
+
+            // Circle Probe (Bore/Boss): fit a circle through the N contact points
+            if (this.trackProbeResult(this.circleProbeState, probedPos, 'circleprobe')) {
+              const result = probecycles.fitCircle(this.circleProbeState.probedPositions);
+
+              this.circleProbeState.result = result;
+              this.emit('circleprobe:complete', {
+                mode: this.circleProbeState.mode,
+                positions: this.circleProbeState.probedPositions,
+                result,
+              });
+              log.info(`[circleprobe:${this.circleProbeState.mode}] Probing completed:`, result);
+            }
+
+            // Rectangle Probe (Pocket/Solid): derive center/width/length
+            // from the 4 wall contacts (order: +X, -X, +Y, -Y)
+            if (this.trackProbeResult(this.rectProbeState, probedPos, 'rectprobe')) {
+              const [plusX, minusX, plusY, minusY] = this.rectProbeState.probedPositions;
+              const result = probecycles.fitRectangle({ plusX, minusX, plusY, minusY });
+
+              this.rectProbeState.result = result;
+              this.emit('rectprobe:complete', {
+                mode: this.rectProbeState.mode,
+                positions: this.rectProbeState.probedPositions,
+                result,
+              });
+              log.info(`[rectprobe:${this.rectProbeState.mode}] Probing completed:`, result);
+            }
           }
         }
       });
@@ -1098,6 +1241,32 @@ class GrblController {
       this.actionTime.queryParserState = 0;
       this.actionTime.queryStatusReport = 0;
       this.actionTime.senderFinishTime = 0;
+    }
+
+    // Shared accumulation step for the corner/circle/rect probe cycles
+    // (same theory as autolevel/edgeprobe above, factored out since these
+    // three cycles have no cycle-specific per-point bookkeeping beyond
+    // "append and check completion" -- only the completion math differs,
+    // which stays in each cycle's own PRB handler branch).
+    // @return {boolean} true once this was the cycle's final point
+    trackProbeResult(state, probedPos, eventName) {
+      if (!(state.probePoints.length > 0 && state.probedPositions.length < state.probePoints.length)) {
+        return false;
+      }
+
+      const newProbedPositions = [...state.probedPositions, probedPos];
+      const isCompleted = newProbedPositions.length >= state.probePoints.length;
+      state.probedPositions = newProbedPositions;
+
+      log.debug(`[${eventName}] Probed ${newProbedPositions.length}/${state.probePoints.length}: posX=${probedPos.x.toFixed(3)}, posY=${probedPos.y.toFixed(3)}, posZ=${probedPos.z.toFixed(3)}`);
+
+      this.emit(`${eventName}:update`, {
+        current: newProbedPositions.length,
+        total: state.probePoints.length,
+        probedPos: { ...probedPos },
+      });
+
+      return isCompleted;
     }
 
     destroy() {
@@ -1868,6 +2037,282 @@ class GrblController {
           const [, callback] = args;
           if (typeof callback === 'function') {
             callback(null, { state: this.probeState });
+          }
+        },
+        'edgeprobe:start': () => {
+          const [params = {}] = args;
+          const {
+            lineAxis,
+            probeAxis,
+            start,
+            end,
+            pointCount,
+            probeDistance,
+            feedrate,
+            retractDistance,
+          } = params;
+
+          const points = edgeprobe.createEdgeProbePoints({ start, end, count: pointCount });
+
+          // Reset probe state
+          this.edgeProbeState = {
+            probedPositions: [],
+            probePoints: points,
+            lineAxis,
+            probeAxis,
+            result: null,
+            config: {
+              lineAxis,
+              probeAxis,
+              start,
+              end,
+              pointCount,
+              probeDistance,
+              feedrate,
+              retractDistance,
+            },
+          };
+
+          log.info(`[edgeprobe:start] Start probing with ${points.length} points along ${lineAxis}, probing ${probeAxis}`);
+
+          // Generate probe G-code: for each sample point along the line,
+          // move there, probe toward it along probeAxis by probeDistance
+          // (an absolute target = point[probeAxis] + probeDistance, since
+          // we stay in G90 throughout), then back off by retractDistance
+          // before moving on to the next point.
+          const AXIS = probeAxis.toUpperCase();
+          const probeGCodes = [];
+          points.forEach((point, index) => {
+            const probeTarget = point[probeAxis] + probeDistance;
+
+            probeGCodes.push(`(Edge Probe: point ${index})`);
+            probeGCodes.push('G90');
+            probeGCodes.push(`G0 X${point.x} Y${point.y}`);
+            probeGCodes.push(`G38.2 ${AXIS}${probeTarget} F${feedrate}`);
+            probeGCodes.push('G91');
+            probeGCodes.push(`G0 ${AXIS}${retractDistance}`);
+            probeGCodes.push('G90');
+          });
+
+          this.command('gcode', probeGCodes);
+        },
+        'edgeprobe:stop': () => {
+          // Reset the machine to cancel the probe cycle immediately
+          this.command('reset');
+
+          // Clear probe state
+          this.edgeProbeState = {
+            probedPositions: [],
+            probePoints: [],
+            lineAxis: null,
+            probeAxis: null,
+            result: null,
+            config: null,
+          };
+          log.info('[edgeprobe:stop] Probe stopped and state cleared');
+        },
+        'edgeprobe:getProbeState': () => {
+          const [, callback] = args;
+          if (typeof callback === 'function') {
+            callback(null, { state: this.edgeProbeState });
+          }
+        },
+        'cornerprobe:start': () => {
+          const [params = {}] = args;
+          const {
+            // Each edge follows the exact same shape as edgeprobe:start's
+            // params: 2+ sample points along the edge, so the corner is
+            // found by intersecting two FITTED LINES rather than assuming
+            // a perfect 90° between two single-point touches.
+            xEdge, // { start: {x,y}, end: {x,y}, pointCount, probeDistance, retractDistance }
+            yEdge, // { start: {x,y}, end: {x,y}, pointCount, probeDistance, retractDistance }
+            feedrate,
+          } = params;
+
+          // xEdge is probed ALONG x (points spaced along y); yEdge is
+          // probed ALONG y (points spaced along x) -- tag each point with
+          // which edge/probeAxis it belongs to so the PRB handler can
+          // split them back apart once all points are in.
+          const xPoints = edgeprobe.createEdgeProbePoints({
+            start: xEdge.start, end: xEdge.end, count: xEdge.pointCount,
+          }).map((p) => ({ ...p, edge: 'x', probeAxis: 'x', target: p.x + xEdge.probeDistance, retractDistance: xEdge.retractDistance }));
+          const yPoints = edgeprobe.createEdgeProbePoints({
+            start: yEdge.start, end: yEdge.end, count: yEdge.pointCount,
+          }).map((p) => ({ ...p, edge: 'y', probeAxis: 'y', target: p.y + yEdge.probeDistance, retractDistance: yEdge.retractDistance }));
+
+          const points = [...xPoints, ...yPoints];
+
+          this.cornerProbeState = {
+            probedPositions: [],
+            probePoints: points,
+            result: null,
+            config: { ...params },
+          };
+
+          log.info(`[cornerprobe:start] Start probing ${xPoints.length} X-edge points then ${yPoints.length} Y-edge points`);
+
+          // Same theory as edgeprobe: probe toward an absolute target
+          // (sample point's coordinate + signed search distance), retract
+          // by a fixed amount, stay in G90 throughout.
+          const probeGCodes = [];
+          points.forEach((point, index) => {
+            const AXIS = point.probeAxis.toUpperCase();
+            probeGCodes.push(`(Corner Probe: ${point.edge}-edge, point ${index})`);
+            probeGCodes.push('G90');
+            probeGCodes.push(`G0 X${point.x} Y${point.y}`);
+            probeGCodes.push(`G38.2 ${AXIS}${point.target} F${feedrate}`);
+            probeGCodes.push('G91');
+            probeGCodes.push(`G0 ${AXIS}${point.retractDistance}`);
+            probeGCodes.push('G90');
+          });
+
+          this.command('gcode', probeGCodes);
+        },
+        'cornerprobe:stop': () => {
+          this.command('reset');
+          this.cornerProbeState = {
+            probedPositions: [],
+            probePoints: [],
+            result: null,
+            config: null,
+          };
+          log.info('[cornerprobe:stop] Probe stopped and state cleared');
+        },
+        'cornerprobe:getProbeState': () => {
+          const [, callback] = args;
+          if (typeof callback === 'function') {
+            callback(null, { state: this.cornerProbeState });
+          }
+        },
+        'circleprobe:start': () => {
+          const [params = {}] = args;
+          const {
+            mode, // 'bore' | 'boss'
+            center,
+            radius,
+            approachRadius,
+            pointCount,
+            feedrate,
+          } = params;
+
+          // Same theory as edgeprobe/cornerprobe: known points computed in
+          // JS, probed one at a time, contacts accumulated via PRB. Bore
+          // starts inside the hole and probes outward; boss starts outside
+          // the post and probes inward -- same math either way, the caller
+          // supplies approachRadius on the correct side of `radius` for
+          // whichever mode this is.
+          const targetPoints = probecycles.createCirclePoints({ center, radius, count: pointCount });
+          const startPoints = probecycles.createCirclePoints({ center, radius: approachRadius, count: pointCount });
+
+          this.circleProbeState = {
+            probedPositions: [],
+            probePoints: targetPoints,
+            mode,
+            result: null,
+            config: { ...params },
+          };
+
+          log.info(`[circleprobe:start] Start ${mode} probing with ${targetPoints.length} points`);
+
+          const probeGCodes = [];
+          targetPoints.forEach((point, index) => {
+            const start = startPoints[index];
+            probeGCodes.push(`(Circle Probe [${mode}]: point ${index})`);
+            probeGCodes.push('G90');
+            probeGCodes.push(`G0 X${start.x} Y${start.y}`);
+            probeGCodes.push(`G38.2 X${point.x} Y${point.y} F${feedrate}`);
+            probeGCodes.push('G90');
+            probeGCodes.push(`G0 X${start.x} Y${start.y}`);
+          });
+
+          this.command('gcode', probeGCodes);
+        },
+        'circleprobe:stop': () => {
+          this.command('reset');
+          this.circleProbeState = {
+            probedPositions: [],
+            probePoints: [],
+            mode: null,
+            result: null,
+            config: null,
+          };
+          log.info('[circleprobe:stop] Probe stopped and state cleared');
+        },
+        'circleprobe:getProbeState': () => {
+          const [, callback] = args;
+          if (typeof callback === 'function') {
+            callback(null, { state: this.circleProbeState });
+          }
+        },
+        'rectprobe:start': () => {
+          const [params = {}] = args;
+          const {
+            mode, // 'pocket' | 'solid'
+            center,
+            width,
+            length,
+            approachClearance,
+            feedrate,
+          } = params;
+
+          const halfW = width / 2;
+          const halfL = length / 2;
+          // Pocket probes outward from inside a cavity; solid probes
+          // inward from outside a block -- same wall math, opposite sign
+          // on where the approach/start point sits relative to the target.
+          const sign = mode === 'pocket' ? 1 : -1;
+
+          const plusXTarget = { x: center.x + (sign * halfW), y: center.y };
+          const minusXTarget = { x: center.x - (sign * halfW), y: center.y };
+          const plusYTarget = { x: center.x, y: center.y + (sign * halfL) };
+          const minusYTarget = { x: center.x, y: center.y - (sign * halfL) };
+
+          const points = [
+            { ...plusXTarget, axis: 'x', wall: 'plusX', start: { x: plusXTarget.x + (sign * approachClearance), y: center.y } },
+            { ...minusXTarget, axis: 'x', wall: 'minusX', start: { x: minusXTarget.x - (sign * approachClearance), y: center.y } },
+            { ...plusYTarget, axis: 'y', wall: 'plusY', start: { x: center.x, y: plusYTarget.y + (sign * approachClearance) } },
+            { ...minusYTarget, axis: 'y', wall: 'minusY', start: { x: center.x, y: minusYTarget.y - (sign * approachClearance) } },
+          ];
+
+          this.rectProbeState = {
+            probedPositions: [],
+            probePoints: points,
+            mode,
+            result: null,
+            config: { ...params },
+          };
+
+          log.info(`[rectprobe:start] Start ${mode} probing (4 walls)`);
+
+          const probeGCodes = [];
+          points.forEach((point) => {
+            const AXIS = point.axis.toUpperCase();
+            const target = point[point.axis];
+            probeGCodes.push(`(Rect Probe [${mode}]: ${point.wall})`);
+            probeGCodes.push('G90');
+            probeGCodes.push(`G0 X${point.start.x} Y${point.start.y}`);
+            probeGCodes.push(`G38.2 ${AXIS}${target} F${feedrate}`);
+            probeGCodes.push('G90');
+            probeGCodes.push(`G0 X${point.start.x} Y${point.start.y}`);
+          });
+
+          this.command('gcode', probeGCodes);
+        },
+        'rectprobe:stop': () => {
+          this.command('reset');
+          this.rectProbeState = {
+            probedPositions: [],
+            probePoints: [],
+            mode: null,
+            result: null,
+            config: null,
+          };
+          log.info('[rectprobe:stop] Probe stopped and state cleared');
+        },
+        'rectprobe:getProbeState': () => {
+          const [, callback] = args;
+          if (typeof callback === 'function') {
+            callback(null, { state: this.rectProbeState });
           }
         },
         'autolevel:loadFromFile': async () => {
