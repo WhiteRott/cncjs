@@ -4,10 +4,12 @@ import find from 'lodash/find';
 import classNames from 'classnames';
 import PropTypes from 'prop-types';
 import React, { PureComponent } from 'react';
+import api from 'app/api';
 import Space from 'app/components/Space';
 import Widget from 'app/components/Widget';
 import controller from 'app/lib/controller';
 import i18n from 'app/lib/i18n';
+import log from 'app/lib/log';
 import { in2mm, mapValueToUnits } from 'app/lib/units';
 import WidgetConfig from '../WidgetConfig';
 import EdgeSkewProbe from './EdgeSkewProbe';
@@ -72,6 +74,9 @@ class ProbingCyclesWidget extends PureComponent {
       setProbeDistance: (value) => {
         this.setState({ probeDistance: value });
       },
+      setProbeTipDiameter: (value) => {
+        this.setState({ probeTipDiameter: value });
+      },
       setProbeFeedrate: (value) => {
         this.setState({ probeFeedrate: value });
       },
@@ -87,9 +92,13 @@ class ProbingCyclesWidget extends PureComponent {
           probeDistance,
           probeFeedrate,
           retractDistance,
+          probeTipDiameter,
         } = this.state;
         const dir = find(PROBE_DIRECTIONS, { value: direction });
         if (!dir) {
+          return;
+        }
+        if (this.exceedsMaxDeflection()) {
           return;
         }
 
@@ -108,6 +117,7 @@ class ProbingCyclesWidget extends PureComponent {
           probeDistance: dir.sign * probeDistance,
           feedrate: probeFeedrate,
           retractDistance: -dir.sign * retractDistance,
+          probeRadius: probeTipDiameter / 2,
         });
       },
       stopProbe: () => {
@@ -180,7 +190,21 @@ class ProbingCyclesWidget extends PureComponent {
 
     componentDidMount() {
       this.addControllerEvents();
+      this.loadToolConfig();
     }
+
+    loadToolConfig = async () => {
+      try {
+        const res = await api.getToolConfig();
+        const tool = res.body;
+        this.setState({
+          toolProbeLength: Number(get(tool, 'toolProbeLength', 0)),
+          toolProbeMaxDeflection: Number(get(tool, 'toolProbeMaxDeflection', 0)),
+        });
+      } catch (err) {
+        log.error(err);
+      }
+    };
 
     componentWillUnmount() {
       this.removeControllerEvents();
@@ -205,19 +229,21 @@ class ProbingCyclesWidget extends PureComponent {
       this.config.set('direction', direction);
       this.config.set('pointCount', pointCount);
 
-      let { probeDistance, probeFeedrate, retractDistance } = this.state;
+      let { probeDistance, probeFeedrate, retractDistance, probeTipDiameter } = this.state;
       let savedStartPoint = startPoint;
       let savedEndPoint = endPoint;
       if (units === IMPERIAL_UNITS) {
         probeDistance = in2mm(probeDistance);
         probeFeedrate = in2mm(probeFeedrate);
         retractDistance = in2mm(retractDistance);
+        probeTipDiameter = in2mm(probeTipDiameter);
         savedStartPoint = { x: in2mm(startPoint.x), y: in2mm(startPoint.y) };
         savedEndPoint = { x: in2mm(endPoint.x), y: in2mm(endPoint.y) };
       }
       this.config.set('probeDistance', Number(probeDistance));
       this.config.set('probeFeedrate', Number(probeFeedrate));
       this.config.set('retractDistance', Number(retractDistance));
+      this.config.set('probeTipDiameter', Number(probeTipDiameter));
       this.config.set('startPoint', savedStartPoint);
       this.config.set('endPoint', savedEndPoint);
     }
@@ -253,6 +279,9 @@ class ProbingCyclesWidget extends PureComponent {
         probeDistance: Number(this.config.get('probeDistance') || 10),
         probeFeedrate: Number(this.config.get('probeFeedrate') || 50),
         retractDistance: Number(this.config.get('retractDistance') || 2),
+        probeTipDiameter: Number(this.config.get('probeTipDiameter') || 0),
+        toolProbeLength: 0,
+        toolProbeMaxDeflection: 0,
         isProbing: false,
         progress: { current: 0, total: 0 },
         result: null,
@@ -295,14 +324,23 @@ class ProbingCyclesWidget extends PureComponent {
       return true;
     }
 
+    exceedsMaxDeflection() {
+      const { probeDistance, toolProbeMaxDeflection } = this.state;
+      if (!toolProbeMaxDeflection) {
+        return false;
+      }
+      return Math.abs(probeDistance) > toolProbeMaxDeflection;
+    }
+
     render() {
       const { widgetId } = this.props;
       const { minimized, isFullscreen } = this.state;
       const isForkedWidget = widgetId.match(/\w+:[\w\-]+/);
       const state = {
         ...this.state,
-        canClick: this.canClick(),
+        canClick: this.canClick() && !this.exceedsMaxDeflection(),
         canGetPosition: this.canClick(),
+        exceedsMaxDeflection: this.exceedsMaxDeflection(),
       };
       const actions = {
         ...this.actions

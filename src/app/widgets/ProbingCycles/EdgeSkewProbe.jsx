@@ -72,6 +72,10 @@ class EdgeSkewProbe extends PureComponent {
         probeDistance,
         probeFeedrate,
         retractDistance,
+        probeTipDiameter,
+        toolProbeLength,
+        toolProbeMaxDeflection,
+        exceedsMaxDeflection,
         isProbing,
         progress,
         result,
@@ -145,6 +149,24 @@ class EdgeSkewProbe extends PureComponent {
             </div>
           </div>
 
+          {toolProbeLength > 0 && (
+            <div className="alert alert-info" style={{ padding: '6px 10px', marginBottom: 12 }}>
+              {i18n._('Your probe stylus extends {{length}}{{units}} below the tool tip. Account for this reduced clearance when jogging to the start position.', {
+                length: mapValueToUnits(toolProbeLength, units).toFixed(3),
+                units: displayUnits,
+              })}
+            </div>
+          )}
+
+          {exceedsMaxDeflection && (
+            <div className="alert alert-warning" style={{ padding: '6px 10px', marginBottom: 12 }}>
+              {i18n._('Probe Distance exceeds the configured Max Probe Deflection ({{max}}{{units}}). Reduce Probe Distance or raise the limit in the Tool widget before running.', {
+                max: mapValueToUnits(toolProbeMaxDeflection, units).toFixed(3),
+                units: displayUnits,
+              })}
+            </div>
+          )}
+
           <div className="row no-gutters">
             <div className="col-xs-6" style={{ paddingRight: 5 }}>
               <div className="form-group">
@@ -180,6 +202,25 @@ class EdgeSkewProbe extends PureComponent {
                 </div>
               </div>
             </div>
+          </div>
+
+          <div className="form-group">
+            <label className="control-label">{i18n._('Probe Tip Diameter')}</label>
+            <div className="input-group input-group-sm">
+              <input
+                type="number"
+                className="form-control"
+                min={0}
+                step={step}
+                disabled={isProbing}
+                value={probeTipDiameter}
+                onChange={(event) => actions.setProbeTipDiameter(Number(event.target.value) || 0)}
+              />
+              <span className="input-group-addon">{displayUnits}</span>
+            </div>
+            <p style={{ marginTop: 4 }}>
+              <i>{i18n._('Ball diameter of your touch probe stylus. Corrects the reported contact position for the offset between the ball surface and its center. Leave at 0 if you\'re probing with the cutting tool or a flat plate.')}</i>
+            </p>
           </div>
 
           <div style={{ display: 'flex', columnGap: 8, marginBottom: 12 }}>

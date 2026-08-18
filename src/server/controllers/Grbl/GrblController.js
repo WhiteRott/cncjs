@@ -170,6 +170,10 @@ class GrblController {
       lineAxis: null,
       probeAxis: null,
 
+      // Ball-tip stylus radius compensation, added to each reported
+      // contact position along probeAxis (see the 'PRB' handler)
+      probeCompensation: 0,
+
       // The line fit computed once all points are probed:
       // { slope, intercept, angleRad, angleDeg }
       result: null,
@@ -859,17 +863,26 @@ class GrblController {
 
             // Track probe data if an edge-probe cycle is active
             if (this.edgeProbeState.probePoints.length > 0 && this.edgeProbeState.probedPositions.length < this.edgeProbeState.probePoints.length) {
-              const newProbedPositions = [...this.edgeProbeState.probedPositions, probedPos];
+              // Correct for the ball-tip stylus radius: the reported
+              // position is where the ball CENTER was at the moment of
+              // contact, offset from the true surface by the radius in the
+              // direction of travel (probeCompensation already carries the
+              // correct sign -- see edgeprobe:start).
+              const compensatedPos = {
+                ...probedPos,
+                [this.edgeProbeState.probeAxis]: probedPos[this.edgeProbeState.probeAxis] + this.edgeProbeState.probeCompensation,
+              };
+              const newProbedPositions = [...this.edgeProbeState.probedPositions, compensatedPos];
               const isCompleted = newProbedPositions.length >= this.edgeProbeState.probePoints.length;
 
               this.edgeProbeState.probedPositions = newProbedPositions;
 
-              log.debug(`[edgeprobe] Probed ${newProbedPositions.length}/${this.edgeProbeState.probePoints.length}: posX=${probedPos.x.toFixed(3)}, posY=${probedPos.y.toFixed(3)}, posZ=${probedPos.z.toFixed(3)}`);
+              log.debug(`[edgeprobe] Probed ${newProbedPositions.length}/${this.edgeProbeState.probePoints.length}: posX=${compensatedPos.x.toFixed(3)}, posY=${compensatedPos.y.toFixed(3)}, posZ=${compensatedPos.z.toFixed(3)}`);
 
               this.emit('edgeprobe:update', {
                 current: newProbedPositions.length,
                 total: this.edgeProbeState.probePoints.length,
-                probedPos: { ...probedPos },
+                probedPos: { ...compensatedPos },
               });
 
               if (isCompleted) {
@@ -1248,22 +1261,33 @@ class GrblController {
     // three cycles have no cycle-specific per-point bookkeeping beyond
     // "append and check completion" -- only the completion math differs,
     // which stays in each cycle's own PRB handler branch).
+    //
+    // If the point about to be recorded carries its own probeAxis +
+    // probeCompensation (ball-tip stylus radius correction, see
+    // cornerprobe:start), it's applied here before the position is stored
+    // -- points without it (circle/rect, not yet implemented) pass through
+    // unchanged.
     // @return {boolean} true once this was the cycle's final point
     trackProbeResult(state, probedPos, eventName) {
       if (!(state.probePoints.length > 0 && state.probedPositions.length < state.probePoints.length)) {
         return false;
       }
 
-      const newProbedPositions = [...state.probedPositions, probedPos];
+      const point = state.probePoints[state.probedPositions.length];
+      const compensatedPos = (point && point.probeAxis && point.probeCompensation)
+        ? { ...probedPos, [point.probeAxis]: probedPos[point.probeAxis] + point.probeCompensation }
+        : probedPos;
+
+      const newProbedPositions = [...state.probedPositions, compensatedPos];
       const isCompleted = newProbedPositions.length >= state.probePoints.length;
       state.probedPositions = newProbedPositions;
 
-      log.debug(`[${eventName}] Probed ${newProbedPositions.length}/${state.probePoints.length}: posX=${probedPos.x.toFixed(3)}, posY=${probedPos.y.toFixed(3)}, posZ=${probedPos.z.toFixed(3)}`);
+      log.debug(`[${eventName}] Probed ${newProbedPositions.length}/${state.probePoints.length}: posX=${compensatedPos.x.toFixed(3)}, posY=${compensatedPos.y.toFixed(3)}, posZ=${compensatedPos.z.toFixed(3)}`);
 
       this.emit(`${eventName}:update`, {
         current: newProbedPositions.length,
         total: state.probePoints.length,
-        probedPos: { ...probedPos },
+        probedPos: { ...compensatedPos },
       });
 
       return isCompleted;
@@ -2050,16 +2074,22 @@ class GrblController {
             probeDistance,
             feedrate,
             retractDistance,
+            probeRadius = 0,
           } = params;
 
           const points = edgeprobe.createEdgeProbePoints({ start, end, count: pointCount });
 
-          // Reset probe state
+          // Reset probe state. probeCompensation is added to each reported
+          // contact position along probeAxis to correct for the ball-tip
+          // stylus radius -- the reported position is where the ball
+          // CENTER was at contact, offset from the true surface by exactly
+          // the radius, in the direction of travel (see the PRB handler).
           this.edgeProbeState = {
             probedPositions: [],
             probePoints: points,
             lineAxis,
             probeAxis,
+            probeCompensation: probeRadius * Math.sign(probeDistance),
             result: null,
             config: {
               lineAxis,
@@ -2070,6 +2100,7 @@ class GrblController {
               probeDistance,
               feedrate,
               retractDistance,
+              probeRadius,
             },
           };
 
@@ -2106,6 +2137,7 @@ class GrblController {
             probePoints: [],
             lineAxis: null,
             probeAxis: null,
+            probeCompensation: 0,
             result: null,
             config: null,
           };
@@ -2127,18 +2159,36 @@ class GrblController {
             xEdge, // { start: {x,y}, end: {x,y}, pointCount, probeDistance, retractDistance }
             yEdge, // { start: {x,y}, end: {x,y}, pointCount, probeDistance, retractDistance }
             feedrate,
+            probeRadius = 0,
           } = params;
 
           // xEdge is probed ALONG x (points spaced along y); yEdge is
           // probed ALONG y (points spaced along x) -- tag each point with
           // which edge/probeAxis it belongs to so the PRB handler can
-          // split them back apart once all points are in.
+          // split them back apart once all points are in. probeCompensation
+          // corrects for the ball-tip stylus radius per point -- see
+          // edgeprobe:start for the derivation; each edge can have its own
+          // probeDistance sign, so it's computed per edge, not shared.
           const xPoints = edgeprobe.createEdgeProbePoints({
             start: xEdge.start, end: xEdge.end, count: xEdge.pointCount,
-          }).map((p) => ({ ...p, edge: 'x', probeAxis: 'x', target: p.x + xEdge.probeDistance, retractDistance: xEdge.retractDistance }));
+          }).map((p) => ({
+            ...p,
+            edge: 'x',
+            probeAxis: 'x',
+            target: p.x + xEdge.probeDistance,
+            retractDistance: xEdge.retractDistance,
+            probeCompensation: probeRadius * Math.sign(xEdge.probeDistance),
+          }));
           const yPoints = edgeprobe.createEdgeProbePoints({
             start: yEdge.start, end: yEdge.end, count: yEdge.pointCount,
-          }).map((p) => ({ ...p, edge: 'y', probeAxis: 'y', target: p.y + yEdge.probeDistance, retractDistance: yEdge.retractDistance }));
+          }).map((p) => ({
+            ...p,
+            edge: 'y',
+            probeAxis: 'y',
+            target: p.y + yEdge.probeDistance,
+            retractDistance: yEdge.retractDistance,
+            probeCompensation: probeRadius * Math.sign(yEdge.probeDistance),
+          }));
 
           const points = [...xPoints, ...yPoints];
 

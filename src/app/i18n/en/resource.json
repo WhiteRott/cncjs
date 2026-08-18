@@ -682,5 +682,11 @@
   "Skew angle: {{angle}}°": "Skew angle: {{angle}}°",
   "Edge is not aligned to the machine axis — consider re-clamping the stock.": "Edge is not aligned to the machine axis — consider re-clamping the stock.",
   "Edge is aligned to the machine axis.": "Edge is aligned to the machine axis.",
-  "Probing Cycles": "Probing Cycles"
+  "Probing Cycles": "Probing Cycles",
+  "Probe Tip Diameter": "Probe Tip Diameter",
+  "Ball diameter of your touch probe stylus. Corrects the reported contact position for the offset between the ball surface and its center. Leave at 0 if you're probing with the cutting tool or a flat plate.": "Ball diameter of your touch probe stylus. Corrects the reported contact position for the offset between the ball surface and its center. Leave at 0 if you're probing with the cutting tool or a flat plate.",
+  "Your probe stylus extends {{length}}{{units}} below the tool tip. Account for this reduced clearance when jogging to the start position.": "Your probe stylus extends {{length}}{{units}} below the tool tip. Account for this reduced clearance when jogging to the start position.",
+  "Probe Distance exceeds the configured Max Probe Deflection ({{max}}{{units}}). Reduce Probe Distance or raise the limit in the Tool widget before running.": "Probe Distance exceeds the configured Max Probe Deflection ({{max}}{{units}}). Reduce Probe Distance or raise the limit in the Tool widget before running.",
+  "Max Probe Deflection": "Max Probe Deflection",
+  "Max Probe Deflection is the farthest the probe stylus can safely travel before it's at risk of over-deflecting or the probe missing the surface entirely. Probing cycles use this to warn or block a run if the configured Probe Distance exceeds it. Leave at 0 to disable the check.": "Max Probe Deflection is the farthest the probe stylus can safely travel before it's at risk of over-deflecting or the probe missing the surface entirely. Probing cycles use this to warn or block a run if the configured Probe Distance exceeds it. Leave at 0 to disable the check."
 }
