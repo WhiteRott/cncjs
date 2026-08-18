@@ -503,8 +503,6 @@
   "Zoom to Fit": "Збільшити до розміру",
   "Zoom In": "Збільшити",
   "Zoom Out": "Зменшити",
-  "Move the camera": "Переміщати проекцію",
-  "Rotate the camera": "Повертати проекцію",
   "No machine profile selected": "Профіль верстату не вибрано",
   "Watch Directory": "Перегляд каталогу",
   "Date modified": "Дата зміни",
@@ -651,7 +649,6 @@
   "Tool Library Widget": "",
   "This widget manages a library of tools (number, diameter, length, and notes).": "",
   "New Tool": "",
-  "e.g. Endmill, Ball Nose, Drill": "",
   "Diameter (mm)": "",
   "Flutes": "",
   "Flute Length (mm)": "",
@@ -663,5 +660,14 @@
   "Tool Library": "",
   "#": "",
   "Diameter": "",
-  "No tools": ""
+  "No tools": "",
+  "Active Tool": "",
+  "Set as Active Tool": "",
+  "Hide Stock": "",
+  "Show Stock": "",
+  "Edit Stock Size...": "",
+  "Stock Size": "",
+  "Width (X, mm)": "",
+  "Length (Y, mm)": "",
+  "Thickness (Z, mm)": ""
 }

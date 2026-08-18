@@ -464,8 +464,6 @@
   "3D rendering": "3D vykreslení",
   "Zoom In": "Přiblížit",
   "Zoom Out": "Oddálit",
-  "Move the camera": "Posunout kameru",
-  "Rotate the camera": "Otočit kameru",
   "Watch Directory": "Sledovat adresář",
   "Date modified": "Datum změny",
   "Type": "Typ",
@@ -651,7 +649,6 @@
   "Tool Library Widget": "",
   "This widget manages a library of tools (number, diameter, length, and notes).": "",
   "New Tool": "",
-  "e.g. Endmill, Ball Nose, Drill": "",
   "Diameter (mm)": "",
   "Flutes": "",
   "Flute Length (mm)": "",
@@ -663,5 +660,14 @@
   "Tool Library": "",
   "#": "",
   "Diameter": "",
-  "No tools": ""
+  "No tools": "",
+  "Active Tool": "",
+  "Set as Active Tool": "",
+  "Hide Stock": "",
+  "Show Stock": "",
+  "Edit Stock Size...": "",
+  "Stock Size": "",
+  "Width (X, mm)": "",
+  "Length (Y, mm)": "",
+  "Thickness (Z, mm)": ""
 }

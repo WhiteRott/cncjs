@@ -464,8 +464,6 @@
   "3D rendering": "三维渲染",
   "Zoom In": "放大",
   "Zoom Out": "缩小",
-  "Move the camera": "移动摄像头",
-  "Rotate the camera": "旋转摄像头",
   "Watch Directory": "监控目录",
   "Date modified": "修改日期",
   "Type": "类型",
@@ -648,7 +646,6 @@
   "Tool Library Widget": "",
   "This widget manages a library of tools (number, diameter, length, and notes).": "",
   "New Tool": "",
-  "e.g. Endmill, Ball Nose, Drill": "",
   "Diameter (mm)": "",
   "Flutes": "",
   "Flute Length (mm)": "",
@@ -660,5 +657,14 @@
   "Tool Library": "",
   "#": "",
   "Diameter": "",
-  "No tools": ""
+  "No tools": "",
+  "Active Tool": "",
+  "Set as Active Tool": "",
+  "Hide Stock": "",
+  "Show Stock": "",
+  "Edit Stock Size...": "",
+  "Stock Size": "",
+  "Width (X, mm)": "",
+  "Length (Y, mm)": "",
+  "Thickness (Z, mm)": ""
 }

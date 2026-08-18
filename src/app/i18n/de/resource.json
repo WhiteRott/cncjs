@@ -464,8 +464,6 @@
   "3D rendering": "3D-Rendering",
   "Zoom In": "Hineinzoomen",
   "Zoom Out": "Herauszoomen",
-  "Move the camera": "Ansicht bewegen",
-  "Rotate the camera": "Ansicht drehen",
   "Watch Directory": "Ordner beobachten",
   "Date modified": "Änderungsdatum",
   "Type": "Typ",
@@ -649,7 +647,6 @@
   "Tool Library Widget": "",
   "This widget manages a library of tools (number, diameter, length, and notes).": "",
   "New Tool": "",
-  "e.g. Endmill, Ball Nose, Drill": "",
   "Diameter (mm)": "",
   "Flutes": "",
   "Flute Length (mm)": "",
@@ -661,5 +658,14 @@
   "Tool Library": "",
   "#": "",
   "Diameter": "",
-  "No tools": ""
+  "No tools": "",
+  "Active Tool": "",
+  "Set as Active Tool": "",
+  "Hide Stock": "",
+  "Show Stock": "",
+  "Edit Stock Size...": "",
+  "Stock Size": "",
+  "Width (X, mm)": "",
+  "Length (Y, mm)": "",
+  "Thickness (Z, mm)": ""
 }

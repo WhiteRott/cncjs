@@ -464,8 +464,6 @@
   "3D rendering": "3D renderelés",
   "Zoom In": "Nagyítás",
   "Zoom Out": "Kicsinyítés",
-  "Move the camera": "Kamera mozgatás",
-  "Rotate the camera": "Kamera forgatás",
   "Watch Directory": "Figyelt Mappa",
   "Date modified": "Modosítás Dátuma",
   "Type": "Típus",
@@ -649,7 +647,6 @@
   "Tool Library Widget": "",
   "This widget manages a library of tools (number, diameter, length, and notes).": "",
   "New Tool": "",
-  "e.g. Endmill, Ball Nose, Drill": "",
   "Diameter (mm)": "",
   "Flutes": "",
   "Flute Length (mm)": "",
@@ -661,5 +658,14 @@
   "Tool Library": "",
   "#": "",
   "Diameter": "",
-  "No tools": ""
+  "No tools": "",
+  "Active Tool": "",
+  "Set as Active Tool": "",
+  "Hide Stock": "",
+  "Show Stock": "",
+  "Edit Stock Size...": "",
+  "Stock Size": "",
+  "Width (X, mm)": "",
+  "Length (Y, mm)": "",
+  "Thickness (Z, mm)": ""
 }

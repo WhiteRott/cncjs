@@ -464,8 +464,6 @@
   "3D rendering": "3D render",
   "Zoom In": "Yakınlaştır",
   "Zoom Out": "Uzaklaştır",
-  "Move the camera": "Kamerayı hareket ettir",
-  "Rotate the camera": "Kamerayı Döndür",
   "Watch Directory": "Dizinin İzlenmesi",
   "Date modified": "Değiştirilme tarihi",
   "Type": "Tip",
@@ -649,7 +647,6 @@
   "Tool Library Widget": "",
   "This widget manages a library of tools (number, diameter, length, and notes).": "",
   "New Tool": "",
-  "e.g. Endmill, Ball Nose, Drill": "",
   "Diameter (mm)": "",
   "Flutes": "",
   "Flute Length (mm)": "",
@@ -661,5 +658,14 @@
   "Tool Library": "",
   "#": "",
   "Diameter": "",
-  "No tools": ""
+  "No tools": "",
+  "Active Tool": "",
+  "Set as Active Tool": "",
+  "Hide Stock": "",
+  "Show Stock": "",
+  "Edit Stock Size...": "",
+  "Stock Size": "",
+  "Width (X, mm)": "",
+  "Length (Y, mm)": "",
+  "Thickness (Z, mm)": ""
 }
