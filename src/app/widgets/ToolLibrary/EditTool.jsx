@@ -4,7 +4,8 @@ import PropTypes from 'prop-types';
 import React, { PureComponent } from 'react';
 import { Button } from 'app/components/Buttons';
 import Modal from 'app/components/Modal';
-import { Form, Input, Textarea } from 'app/components/Validation';
+import { Form, Input, Select, Textarea } from 'app/components/Validation';
+import { TOOL_SHAPES } from 'app/constants';
 import i18n from 'app/lib/i18n';
 import portal from 'app/lib/portal';
 import * as validations from 'app/lib/validations';
@@ -89,16 +90,20 @@ class EditTool extends PureComponent {
                 <div className="col-xs-6" style={{ paddingLeft: 5 }}>
                   <div className="form-group">
                     <label>{i18n._('Type')}</label>
-                    <Input
+                    <Select
                       ref={c => {
                         this.fields.type = c;
                       }}
-                      type="text"
                       className="form-control"
                       name="type"
-                      value={type}
-                      placeholder={i18n._('e.g. Endmill, Ball Nose, Drill')}
-                    />
+                      value={type || TOOL_SHAPES[0].value}
+                    >
+                      {TOOL_SHAPES.map(shape => (
+                        <option key={shape.value} value={shape.value}>
+                          {i18n._(shape.label)}
+                        </option>
+                      ))}
+                    </Select>
                   </div>
                 </div>
               </div>
