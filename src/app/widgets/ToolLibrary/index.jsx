@@ -1,5 +1,6 @@
 import classNames from 'classnames';
 import find from 'lodash/find';
+import pubsub from 'pubsub-js';
 import PropTypes from 'prop-types';
 import React, { PureComponent } from 'react';
 import api from 'app/api';
@@ -100,6 +101,14 @@ class ToolLibraryWidget extends PureComponent {
           // Ignore error
         }
       },
+      setActiveTool: async (id) => {
+        try {
+          await api.toolLibrary.activate(id);
+          await this.fetchTools();
+        } catch (err) {
+          // Ignore error
+        }
+      },
       openAddToolModal: () => {
         this.actions.openModal(MODAL_ADD_TOOL);
       },
@@ -116,6 +125,9 @@ class ToolLibraryWidget extends PureComponent {
         const res = await api.toolLibrary.fetch();
         const { records: tools } = res.body;
         this.setState({ tools: tools });
+
+        const activeTool = find(tools, { active: true }) || null;
+        pubsub.publish('tool:active', activeTool);
       } catch (err) {
         // Ignore error
       }

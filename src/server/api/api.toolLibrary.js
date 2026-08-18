@@ -26,10 +26,11 @@ const toRecordFields = (record) => {
     fluteLength = 0,
     length = 0,
     flutes = 0,
-    notes = ''
+    notes = '',
+    active = false
   } = { ...record };
 
-  return { id, mtime, number, name, type, diameter, fluteLength, length, flutes, notes };
+  return { id, mtime, number, name, type, diameter, fluteLength, length, flutes, notes, active };
 };
 
 const getSanitizedRecords = () => {
@@ -162,6 +163,30 @@ export const update = (req, res) => {
     const index = records.findIndex(r => r.id === id);
     records[index] = updatedRecord;
     config.set(CONFIG_KEY, records);
+
+    res.send({ err: null });
+  } catch (err) {
+    res.status(ERR_INTERNAL_SERVER_ERROR).send({
+      msg: 'Failed to save ' + JSON.stringify(settings.rcfile)
+    });
+  }
+};
+
+export const activate = (req, res) => {
+  const id = req.params.id;
+  const records = getSanitizedRecords();
+  const record = find(records, { id: id });
+
+  if (!record) {
+    res.status(ERR_NOT_FOUND).send({
+      msg: 'Not found'
+    });
+    return;
+  }
+
+  try {
+    const updatedRecords = records.map(r => toRecordFields({ ...r, active: (r.id === id) }));
+    config.set(CONFIG_KEY, updatedRecords);
 
     res.send({ err: null });
   } catch (err) {

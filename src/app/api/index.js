@@ -205,6 +205,18 @@ toolLibrary.delete = (id) => new Promise((resolve, reject) => {
     });
 });
 
+toolLibrary.activate = (id) => new Promise((resolve, reject) => {
+  authrequest
+    .post('/api/tool-library/' + id + '/activate')
+    .end((err, res) => {
+      if (err) {
+        reject(res);
+      } else {
+        resolve(res);
+      }
+    });
+});
+
 //
 // G-code
 //

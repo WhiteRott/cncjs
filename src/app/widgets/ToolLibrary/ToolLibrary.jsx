@@ -16,6 +16,11 @@ class ToolLibrary extends PureComponent {
       actions.openEditToolModal(tool.id);
     };
 
+    handleSetActiveTool = (tool) => (event) => {
+      const { actions } = this.props;
+      actions.setActiveTool(tool.id);
+    };
+
     render() {
       const { state } = this.props;
       const { tools = [] } = state;
@@ -26,6 +31,7 @@ class ToolLibrary extends PureComponent {
             <table className={styles.table}>
               <thead>
                 <tr>
+                  <th style={{ width: '1%' }} />
                   <th>{i18n._('#')}</th>
                   <th>{i18n._('Name')}</th>
                   <th>{i18n._('Diameter')}</th>
@@ -35,7 +41,7 @@ class ToolLibrary extends PureComponent {
               <tbody>
                 {tools.length === 0 && (
                   <tr>
-                    <td colSpan="4">
+                    <td colSpan="5">
                       <div className={styles.emptyResult}>
                         {i18n._('No tools')}
                       </div>
@@ -44,6 +50,23 @@ class ToolLibrary extends PureComponent {
                 )}
                 {ensureArray(tools).map((tool) => (
                   <tr key={tool.id}>
+                    <td style={{ width: '1%' }}>
+                      <Button
+                        aria-label={tool.active ? `${tool.name} is the active tool` : `Set active tool: ${tool.name}`}
+                        compact
+                        btnSize="xs"
+                        btnStyle="flat"
+                        disabled={tool.active}
+                        onClick={this.handleSetActiveTool(tool)}
+                        title={tool.active ? i18n._('Active Tool') : i18n._('Set as Active Tool')}
+                      >
+                        <i
+                          aria-hidden="true"
+                          className={tool.active ? 'fa fa-check-circle' : 'fa fa-circle-o'}
+                          style={tool.active ? { color: '#5cb85c' } : undefined}
+                        />
+                      </Button>
+                    </td>
                     <td>{tool.number}</td>
                     <td>{tool.name}</td>
                     <td>{tool.diameter}</td>
