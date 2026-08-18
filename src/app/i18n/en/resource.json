@@ -667,5 +667,20 @@
   "Stock Size": "Stock Size",
   "Width (X, mm)": "Width (X, mm)",
   "Length (Y, mm)": "Length (Y, mm)",
-  "Thickness (Z, mm)": "Thickness (Z, mm)"
+  "Thickness (Z, mm)": "Thickness (Z, mm)",
+  "Probing Cycles Widget": "Probing Cycles Widget",
+  "Multi-point edge probing to find and confirm stock skew relative to the machine axes.": "Multi-point edge probing to find and confirm stock skew relative to the machine axes.",
+  "Use the current work position for this axis.": "Use the current work position for this axis.",
+  "Probe Direction": "Probe Direction",
+  "Which way the probe moves at each sample point. Points are spaced along the other axis.": "Which way the probe moves at each sample point. Points are spaced along the other axis.",
+  "Start Point": "Start Point",
+  "End Point": "End Point",
+  "Number of Points": "Number of Points",
+  "Retract Distance": "Retract Distance",
+  "Probing point {{current}} of {{total}}...": "Probing point {{current}} of {{total}}...",
+  "Result": "Result",
+  "Skew angle: {{angle}}°": "Skew angle: {{angle}}°",
+  "Edge is not aligned to the machine axis — consider re-clamping the stock.": "Edge is not aligned to the machine axis — consider re-clamping the stock.",
+  "Edge is aligned to the machine axis.": "Edge is aligned to the machine axis.",
+  "Probing Cycles": "Probing Cycles"
 }
