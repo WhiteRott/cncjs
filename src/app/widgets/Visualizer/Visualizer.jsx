@@ -11,16 +11,19 @@ import ReactDOM from 'react-dom';
 import * as THREE from 'three';
 import {
   IMPERIAL_UNITS,
-  METRIC_UNITS
+  METRIC_UNITS,
+  TOOL_SHAPE_ENDMILL
 } from 'app/constants';
 import CombinedCamera from 'app/lib/three/CombinedCamera';
 import TrackballControls from 'app/lib/three/TrackballControls';
 import * as WebGL from 'app/lib/three/WebGL';
+import api from 'app/api';
 import log from 'app/lib/log';
 import { getRenderPixelRatio } from 'app/lib/pixel-ratio';
 import { mapValueToUnits } from 'app/lib/units';
 import store from 'app/store';
-import { getBoundingBox, loadSTL, loadTexture } from './helpers';
+import { getBoundingBox } from './helpers';
+import { createCuttingToolObject, disposeCuttingToolObject } from './CuttingToolGeometry';
 import Viewport from './Viewport';
 import CoordinateAxes from './CoordinateAxes';
 import Cuboid from './Cuboid';
@@ -30,10 +33,6 @@ import PivotPoint3 from './PivotPoint3';
 import TextSprite from './TextSprite';
 import GCodeVisualizer from './GCodeVisualizer';
 import ProbeVisualization from './ProbeVisualization';
-import {
-  CAMERA_MODE_PAN,
-  CAMERA_MODE_ROTATE
-} from './constants';
 
 const IMPERIAL_GRID_COUNT = 32; // 32 in
 const IMPERIAL_GRID_SPACING = 25.4; // 1 in
@@ -52,6 +51,12 @@ const ORTHOGRAPHIC_FAR = 2000;
 const CAMERA_DISTANCE = 200; // Move the camera out a bit from the origin (0, 0, 0)
 const TRACKBALL_CONTROLS_MIN_DISTANCE = 1;
 const TRACKBALL_CONTROLS_MAX_DISTANCE = 2000;
+// The cutting tool models (bit.stl and the CuttingPointer sphere) are
+// authored/constructed to represent a tool of roughly this size by default.
+// Active-tool scaling below is relative to these baselines.
+const DEFAULT_TOOL_DIAMETER = 2; // mm, matches CuttingPointer's default diameter
+const DEFAULT_TOOL_LENGTH = 20; // mm, assumed baseline for the bit.stl model's height
+const ORIGIN_MARKER_SIZE = 15; // mm, arm length of the work-zero axis flag
 
 class Visualizer extends Component {
     static propTypes = {
@@ -152,6 +157,9 @@ class Visualizer extends Component {
         this.updateCuttingPointerPosition();
         this.updateLimitsPosition();
         this.updateProbeVisualizationPosition();
+        this.updateOriginMarkerPosition();
+        this.updateStockPosition();
+        this.updateGCodePosition();
         if (this.group) {
           this.rebuildCoordinateSystems();
         }
@@ -184,6 +192,9 @@ class Visualizer extends Component {
       this.updateCuttingPointerPosition();
       this.updateLimitsPosition();
       this.updateProbeVisualizationPosition();
+      this.updateOriginMarkerPosition();
+      this.updateStockPosition();
+      this.updateGCodePosition();
 
       // Rebuild grid and axes to match the new machine profile dimensions
       if (this.group) {
@@ -219,7 +230,11 @@ class Visualizer extends Component {
       this.controls = null;
       this.viewport = null;
       this.cuttingTool = null;
+      this.cuttingToolMaterial = null;
       this.cuttingPointer = null;
+      this.activeTool = null;
+      this.originMarker = null;
+      this.stock = null;
       this.limits = null;
       this.gcodeVisualizer = null;
     }
@@ -239,6 +254,20 @@ class Visualizer extends Component {
       // fires on subsequent updates, so without this call the saved profile
       // never reaches the scene until the user re-selects it.
       this.changeMachineProfile();
+
+      // Fetch whichever tool is currently marked active, if any -- the
+      // 'tool:active' subscription above only covers changes made while
+      // this widget is mounted, not the tool library's already-persisted
+      // active tool from a previous session.
+      api.toolLibrary.fetch()
+        .then((res) => {
+          const { records = [] } = { ...res.body };
+          const activeTool = records.find(record => record.active) || null;
+          this.updateActiveToolGeometry(activeTool);
+        })
+        .catch(() => {
+          // Ignore error
+        });
     }
 
     componentDidUpdate(prevProps) {
@@ -276,12 +305,6 @@ class Visualizer extends Component {
         if (this.viewport) {
           this.viewport.update();
         }
-        needUpdateScene = true;
-      }
-
-      // Camera Mode
-      if (prevState.cameraMode !== state.cameraMode) {
-        this.setCameraMode(state.cameraMode);
         needUpdateScene = true;
       }
 
@@ -338,6 +361,26 @@ class Visualizer extends Component {
         needUpdateScene = true;
       }
 
+      // Whether to show stock
+      if (this.stock && (this.stock.visible !== state.objects.stock.visible)) {
+        this.stock.visible = state.objects.stock.visible;
+        needUpdateScene = true;
+      }
+
+      // Stock size
+      {
+        const prevStock = prevState.objects.stock;
+        const stock = state.objects.stock;
+        if (
+          prevStock.width !== stock.width ||
+          prevStock.length !== stock.length ||
+          prevStock.thickness !== stock.thickness
+        ) {
+          this.rebuildStock(stock.width, stock.length, stock.thickness);
+          needUpdateScene = true;
+        }
+      }
+
       { // Update position
         let needUpdatePosition = false;
 
@@ -364,6 +407,9 @@ class Visualizer extends Component {
           this.updateCuttingPointerPosition();
           this.updateLimitsPosition();
           this.updateProbeVisualizationPosition();
+          this.updateOriginMarkerPosition();
+          this.updateStockPosition();
+          this.updateGCodePosition();
         }
       }
 
@@ -416,6 +462,9 @@ class Visualizer extends Component {
         }),
         pubsub.subscribe('autolevel:hideProbeVisualization', (msg) => {
           this.hideProbeVisualization();
+        }),
+        pubsub.subscribe('tool:active', (msg, tool) => {
+          this.updateActiveToolGeometry(tool);
         }),
         pubsub.subscribe('autolevel:updateProbeVisualization', (msg, data) => {
           log.info('[Visualizer] Received updateProbeVisualization event:', data);
@@ -882,8 +931,6 @@ class Visualizer extends Component {
       this.camera = this.createCombinedCamera(width, height);
       this.controls = this.createTrackballControls(this.camera, this.renderer.domElement);
 
-      this.setCameraMode(state.cameraMode);
-
       // Projection
       if (state.projection === 'orthographic') {
         this.camera.toOrthographic();
@@ -920,53 +967,26 @@ class Visualizer extends Component {
       this.rebuildCoordinateSystems();
 
       { // Cutting Tool
-        Promise.all([
-          loadSTL('assets/models/stl/bit.stl').then(geometry => geometry),
-          loadTexture('assets/textures/brushed-steel-texture.jpg').then(texture => texture),
-        ]).then(result => {
-          const [geometry, texture] = result;
-
-          // Rotate the geometry 90 degrees about the X axis.
-          geometry.rotateX(-Math.PI / 2);
-
-          // Scale the geometry data.
-          geometry.scale(0.5, 0.5, 0.5);
-
-          // Compute the bounding box.
-          geometry.computeBoundingBox();
-
-          // Set the desired position from the origin rather than its center.
-          const height = geometry.boundingBox.max.z - geometry.boundingBox.min.z;
-          geometry.translate(0, 0, (height / 2));
-
-          let material;
-          if (geometry.hasColors) {
-            material = new THREE.MeshLambertMaterial({
-              map: texture,
-              opacity: 0.9,
-              transparent: false
-            });
-          }
-
-          const object = new THREE.Object3D();
-          object.add(new THREE.Mesh(geometry, material));
-
-          this.cuttingTool = object;
-          this.cuttingTool.name = 'CuttingTool';
-          this.cuttingTool.visible = objects.cuttingTool.visible;
-
-          this.group.add(this.cuttingTool);
-
-          // The STL/texture load is async, so the tool may be added to the
-          // group after changeMachineProfile() has already run during mount.
-          // Sync its position to the current pivot/WPos so it lands at the
-          // correct spot instead of the default (0, 0, 0) (which would be the
-          // visible workspace center under any non-trivial machine profile).
-          this.updateCuttingToolPosition();
-
-          // Update the scene
-          this.updateScene();
+        this.cuttingToolMaterial = new THREE.MeshPhongMaterial({
+          color: colornames('silver'),
+          shininess: 80,
         });
+
+        this.cuttingTool = createCuttingToolObject({
+          shapeType: TOOL_SHAPE_ENDMILL,
+          diameter: DEFAULT_TOOL_DIAMETER,
+          length: DEFAULT_TOOL_LENGTH,
+          material: this.cuttingToolMaterial,
+        });
+        this.cuttingTool.name = 'CuttingTool';
+        this.cuttingTool.visible = objects.cuttingTool.visible;
+
+        this.group.add(this.cuttingTool);
+        this.updateCuttingToolPosition();
+
+        // The active tool may have already been fetched/received before the
+        // scene finished creating -- apply it now that this.cuttingTool exists.
+        this.updateActiveToolGeometry(this.activeTool);
       }
 
       { // Cutting Pointer
@@ -988,6 +1008,43 @@ class Visualizer extends Component {
         this.group.add(this.limits);
 
         this.updateLimitsPosition();
+      }
+
+      { // Origin Marker
+        // Small red/green/blue axis flag showing where work coordinate
+        // (0, 0, 0) currently is -- unlike the cutting tool/pointer, this
+        // doesn't move with the tool, so it stays behind as a persistent
+        // reference to wherever X0/Y0/Z0 was last set.
+        this.originMarker = new CoordinateAxes({
+          maxX: ORIGIN_MARKER_SIZE,
+          maxY: ORIGIN_MARKER_SIZE,
+          maxZ: ORIGIN_MARKER_SIZE,
+        });
+        this.originMarker.name = 'OriginMarker';
+        this.group.add(this.originMarker);
+
+        this.updateOriginMarkerPosition();
+      }
+
+      { // Stock
+        // A translucent box representing the physical material, anchored at
+        // work coordinate (0, 0, 0) the same way the origin marker is -- its
+        // front-left-top corner sits at work zero, extending +X/+Y/-Z from
+        // there (touch-off convention: Z zero at the material's top surface).
+        this.stockMaterial = new THREE.MeshBasicMaterial({
+          color: colornames('burlywood'),
+          transparent: true,
+          opacity: 0.3,
+          side: THREE.DoubleSide,
+        });
+
+        const stock = objects.stock;
+        this.stock = this.createStockMesh(stock.width, stock.length, stock.thickness);
+        this.stock.name = 'Stock';
+        this.stock.visible = stock.visible;
+        this.group.add(this.stock);
+
+        this.updateStockPosition();
       }
 
       { // Probe Visualization
@@ -1156,34 +1213,177 @@ class Visualizer extends Component {
       this.cuttingTool.rotateZ(-(rpm / 60 * degrees)); // rotate in clockwise direction
     }
 
-    // Update cutting tool position
+    // Update cutting tool position. Uses machinePosition (not workPosition)
+    // so the tool stays consistent with the grid/limits box, which are also
+    // built in machine coordinates (see rebuildCoordinateSystems) -- using
+    // work coordinates here would place the tool up to a full WCS offset
+    // away from the drawn work area whenever work-zero isn't near machine
+    // zero (i.e. almost always, once you've actually zeroed on a workpiece).
     updateCuttingToolPosition() {
       if (!this.cuttingTool) {
         return;
       }
 
       const pivotPoint = this.pivotPoint.get();
-      const { x: wpox, y: wpoy, z: wpoz } = this.workPosition;
-      const x0 = wpox - pivotPoint.x;
-      const y0 = wpoy - pivotPoint.y;
-      const z0 = wpoz - pivotPoint.z;
+      const { x: mpox, y: mpoy, z: mpoz } = this.machinePosition;
+      const x0 = mpox - pivotPoint.x;
+      const y0 = mpoy - pivotPoint.y;
+      const z0 = mpoz - pivotPoint.z;
 
       this.cuttingTool.position.set(x0, y0, z0);
     }
 
-    // Update cutting pointer position
+    // Update cutting pointer position. See updateCuttingToolPosition for why
+    // this uses machinePosition rather than workPosition.
     updateCuttingPointerPosition() {
       if (!this.cuttingPointer) {
         return;
       }
 
       const pivotPoint = this.pivotPoint.get();
-      const { x: wpox, y: wpoy, z: wpoz } = this.workPosition;
-      const x0 = wpox - pivotPoint.x;
-      const y0 = wpoy - pivotPoint.y;
-      const z0 = wpoz - pivotPoint.z;
+      const { x: mpox, y: mpoy, z: mpoz } = this.machinePosition;
+      const x0 = mpox - pivotPoint.x;
+      const y0 = mpoy - pivotPoint.y;
+      const z0 = mpoz - pivotPoint.z;
 
       this.cuttingPointer.position.set(x0, y0, z0);
+    }
+
+    // Update origin marker position. The grid/axes are built in raw MACHINE
+    // coordinates and shifted by -pivotPoint (see rebuildCoordinateSystems),
+    // while the tool/pointer render from WORK coordinates minus the same
+    // pivot -- so "work coordinate (0, 0, 0)" isn't a fixed scene point on
+    // its own; it has to be expressed in the grid's machine-coordinate frame
+    // to actually land in the right spot. machinePosition - workPosition is
+    // exactly that: the work-zero point in machine coordinates. It stays
+    // constant while jogging under a fixed WCS (both shift together), and
+    // only changes at the moment you re-zero -- which is what makes this
+    // marker stay behind when you jog away, instead of tracking the tool.
+    updateOriginMarkerPosition() {
+      if (!this.originMarker) {
+        return;
+      }
+
+      const pivotPoint = this.pivotPoint.get();
+      const { x: mpox, y: mpoy, z: mpoz } = this.machinePosition;
+      const { x: wpox, y: wpoy, z: wpoz } = this.workPosition;
+      const x0 = (mpox - wpox) - pivotPoint.x;
+      const y0 = (mpoy - wpoy) - pivotPoint.y;
+      const z0 = (mpoz - wpoz) - pivotPoint.z;
+
+      this.originMarker.position.set(x0, y0, z0);
+    }
+
+    // Builds a stock mesh of the given size, with its front-left-top corner
+    // at local (0, 0, 0) -- BoxGeometry is centered by default, so it's
+    // translated to span X:[0,width], Y:[0,length], Z:[-thickness,0].
+    createStockMesh(width, length, thickness) {
+      const safeWidth = Math.max(Number(width) || 0, 0.001);
+      const safeLength = Math.max(Number(length) || 0, 0.001);
+      const safeThickness = Math.max(Number(thickness) || 0, 0.001);
+
+      const geometry = new THREE.BoxGeometry(safeWidth, safeLength, safeThickness);
+      geometry.translate(safeWidth / 2, safeLength / 2, -safeThickness / 2);
+
+      return new THREE.Mesh(geometry, this.stockMaterial);
+    }
+
+    // Rebuilds the stock mesh at a new size (dimensions changed via the
+    // Stock Size modal), preserving its visibility and position.
+    rebuildStock(width, length, thickness) {
+      if (!this.stock) {
+        return;
+      }
+
+      const wasVisible = this.stock.visible;
+      this.group.remove(this.stock);
+      this.stock.geometry.dispose();
+
+      this.stock = this.createStockMesh(width, length, thickness);
+      this.stock.name = 'Stock';
+      this.stock.visible = wasVisible;
+      this.group.add(this.stock);
+      this.updateStockPosition();
+    }
+
+    // Update stock position. Anchored the same way as the origin marker
+    // (see updateOriginMarkerPosition) -- its front-left-top corner always
+    // sits at work coordinate (0, 0, 0), wherever that currently is.
+    updateStockPosition() {
+      if (!this.stock) {
+        return;
+      }
+
+      const pivotPoint = this.pivotPoint.get();
+      const { x: mpox, y: mpoy, z: mpoz } = this.machinePosition;
+      const { x: wpox, y: wpoy, z: wpoz } = this.workPosition;
+      const x0 = (mpox - wpox) - pivotPoint.x;
+      const y0 = (mpoy - wpoy) - pivotPoint.y;
+      const z0 = (mpoz - wpoz) - pivotPoint.z;
+
+      this.stock.position.set(x0, y0, z0);
+    }
+
+    // Update the loaded G-code toolpath's position. Its vertices are drawn
+    // directly from the G-code's own X/Y/Z values, which are WORK
+    // coordinates (that's what the controller executes them as) -- so it's
+    // anchored the exact same way as the stock/origin marker, putting the
+    // toolpath's own work-coordinate (0, 0, 0) at the correct spot relative
+    // to the stock, instead of the toolpath just self-centering on its own
+    // bounding box regardless of where work-zero actually is.
+    updateGCodePosition() {
+      const obj = this.group && this.group.getObjectByName('Visualizer');
+      if (!obj) {
+        return;
+      }
+
+      const pivotPoint = this.pivotPoint.get();
+      const { x: mpox, y: mpoy, z: mpoz } = this.machinePosition;
+      const { x: wpox, y: wpoy, z: wpoz } = this.workPosition;
+      const x0 = (mpox - wpox) - pivotPoint.x;
+      const y0 = (mpoy - wpoy) - pivotPoint.y;
+      const z0 = (mpoz - wpoz) - pivotPoint.z;
+
+      obj.position.set(x0, y0, z0);
+    }
+
+    // Scales the cutting tool model and pointer to match the active tool's
+    // shape/diameter/length. Rebuilds the tool mesh, since different tool
+    // types are different shapes, not just different sizes of the same one.
+    // Pass null to reset back to the default appearance.
+    updateActiveToolGeometry(tool) {
+      this.activeTool = tool || null;
+
+      const shapeType = this.activeTool ? this.activeTool.type : TOOL_SHAPE_ENDMILL;
+      const diameter = (this.activeTool && Number(this.activeTool.diameter) > 0)
+        ? Number(this.activeTool.diameter)
+        : DEFAULT_TOOL_DIAMETER;
+      const length = (this.activeTool && Number(this.activeTool.length) > 0)
+        ? Number(this.activeTool.length)
+        : DEFAULT_TOOL_LENGTH;
+
+      if (this.cuttingPointer) {
+        this.cuttingPointer.scale.setScalar(diameter / DEFAULT_TOOL_DIAMETER);
+      }
+
+      if (this.cuttingTool) {
+        const wasVisible = this.cuttingTool.visible;
+        this.group.remove(this.cuttingTool);
+        disposeCuttingToolObject(this.cuttingTool);
+
+        this.cuttingTool = createCuttingToolObject({
+          shapeType,
+          diameter,
+          length,
+          material: this.cuttingToolMaterial,
+        });
+        this.cuttingTool.name = 'CuttingTool';
+        this.cuttingTool.visible = wasVisible;
+        this.group.add(this.cuttingTool);
+        this.updateCuttingToolPosition();
+      }
+
+      this.updateScene({ forceUpdate: true });
     }
 
     // Update limits position
@@ -1253,28 +1453,38 @@ class Visualizer extends Component {
         bbox.min.z + (dZ / 2)
       );
 
-      // Set the pivot point to the center of the loaded object
+      // Set the pivot point to the center of the loaded object, purely for
+      // camera framing -- see updateGCodePosition for how the toolpath
+      // itself is actually anchored (to work-zero, not to its own bounds).
       this.pivotPoint.set(center.x, center.y, center.z);
 
-      // Explicitly anchor the gcode mesh so its bounding-box center lands at
-      // world origin, independent of the pivot-delta callback's translation
-      // history. Without this, when unload() leaves the pivot at the machine
-      // profile's center (rather than (0, 0, 0)), the delta from
-      // profile_center → gcode_center would land the mesh at world
-      // profile_center instead of world origin.
-      obj.position.set(-center.x, -center.y, -center.z);
-
-      // Update position
+      // Update position. updateGCodePosition anchors the toolpath to
+      // work-zero (its vertices are already in work coordinates -- that's
+      // what the controller executes them as), the same way the stock and
+      // origin marker are, so it lines up with the stock instead of just
+      // self-centering on its own bounding box regardless of where
+      // work-zero actually is.
       this.updateCuttingToolPosition();
       this.updateCuttingPointerPosition();
       this.updateLimitsPosition();
       this.updateProbeVisualizationPosition();
+      this.updateOriginMarkerPosition();
+      this.updateStockPosition();
+      this.updateGCodePosition();
 
       if (this.viewport && dX > 0 && dY > 0) {
         // The minimum viewport is 50x50mm
         const width = Math.max(dX, 50);
         const height = Math.max(dY, 50);
-        const target = new THREE.Vector3(0, 0, bbox.max.z);
+        // bbox was measured before obj.position was set above, so it's in
+        // the object's own local/pre-shift space -- add the object's actual
+        // scene position to get where its top now really is, so the camera
+        // frames the toolpath where it actually rendered, not world origin.
+        const target = new THREE.Vector3(
+          obj.position.x,
+          obj.position.y,
+          obj.position.z + bbox.max.z
+        );
         this.viewport.set(width, height, target);
       }
 
@@ -1315,6 +1525,8 @@ class Visualizer extends Component {
         this.updateCuttingPointerPosition();
         this.updateLimitsPosition();
         this.updateProbeVisualizationPosition();
+        this.updateOriginMarkerPosition();
+        this.updateStockPosition();
 
         if (this.group) {
           this.rebuildCoordinateSystems();
@@ -1331,22 +1543,6 @@ class Visualizer extends Component {
 
       // Update the scene
       this.updateScene();
-    }
-
-    setCameraMode(mode) {
-      // https://developer.mozilla.org/en-US/docs/Web/API/MouseEvent/button
-      // A number representing a given button:
-      // 0: main button pressed, usually the left button or the un-initialized state
-      const MAIN_BUTTON = 0;
-      const ROTATE = 0;
-      const PAN = 2;
-
-      if (mode === CAMERA_MODE_ROTATE) {
-        this.controls && this.controls.setMouseButtonState(MAIN_BUTTON, ROTATE);
-      }
-      if (mode === CAMERA_MODE_PAN) {
-        this.controls && this.controls.setMouseButtonState(MAIN_BUTTON, PAN);
-      }
     }
 
     toTopView() {

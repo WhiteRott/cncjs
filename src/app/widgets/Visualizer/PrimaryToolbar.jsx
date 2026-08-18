@@ -51,6 +51,7 @@ import {
   // Workflow
   WORKFLOW_STATE_IDLE
 } from 'app/constants';
+import { MODAL_STOCK_SIZE } from './constants';
 import styles from './index.styl';
 
 class PrimaryToolbar extends PureComponent {
@@ -422,6 +423,27 @@ class PrimaryToolbar extends PureComponent {
                   {objects.cuttingTool.visible
                     ? i18n._('Hide Cutting Tool')
                     : i18n._('Show Cutting Tool')}
+                </MenuItem>
+                <MenuItem divider />
+                <MenuItem
+                  disabled={!canToggleOptions}
+                  onSelect={actions.toggleStockVisibility}
+                >
+                  {objects.stock.visible
+                    ? <i aria-hidden="true" className="fa fa-toggle-on fa-fw" />
+                    : <i aria-hidden="true" className="fa fa-toggle-off fa-fw" />}
+                  <Space width={8} />
+                  {objects.stock.visible
+                    ? i18n._('Hide Stock')
+                    : i18n._('Show Stock')}
+                </MenuItem>
+                <MenuItem
+                  disabled={!canToggleOptions}
+                  onSelect={() => actions.openModal(MODAL_STOCK_SIZE)}
+                >
+                  <i aria-hidden="true" className="fa fa-fw fa-cube" />
+                  <Space width={8} />
+                  {i18n._('Edit Stock Size...')}
                 </MenuItem>
               </Dropdown.Menu>
             </Dropdown>

@@ -28,6 +28,7 @@ import Notifications from './Notifications';
 import Loading from './Loading';
 import Rendering from './Rendering';
 import WatchDirectory from './WatchDirectory';
+import StockSize from './StockSize';
 import {
   // Units
   IMPERIAL_UNITS,
@@ -49,9 +50,8 @@ import {
   WORKFLOW_STATE_IDLE
 } from '../../constants';
 import {
-  CAMERA_MODE_PAN,
-  CAMERA_MODE_ROTATE,
   MODAL_WATCH_DIRECTORY,
+  MODAL_STOCK_SIZE,
   NOTIFICATION_PROGRAM_ERROR,
   NOTIFICATION_M0_PROGRAM_PAUSE,
   NOTIFICATION_M1_PROGRAM_PAUSE,
@@ -546,17 +546,31 @@ class VisualizerWidget extends PureComponent {
           }
         }));
       },
+      toggleStockVisibility: () => {
+        this.setState((state) => ({
+          objects: {
+            ...state.objects,
+            stock: {
+              ...state.objects.stock,
+              visible: !state.objects.stock.visible
+            }
+          }
+        }));
+      },
+      setStockSize: ({ width, length, thickness }) => {
+        this.setState((state) => ({
+          objects: {
+            ...state.objects,
+            stock: {
+              ...state.objects.stock,
+              width: Number(width) || 0,
+              length: Number(length) || 0,
+              thickness: Number(thickness) || 0,
+            }
+          }
+        }));
+      },
       camera: {
-        toRotateMode: () => {
-          this.setState((state) => ({
-            cameraMode: CAMERA_MODE_ROTATE
-          }));
-        },
-        toPanMode: () => {
-          this.setState((state) => ({
-            cameraMode: CAMERA_MODE_PAN
-          }));
-        },
         zoomFit: () => {
           if (this.visualizer) {
             this.visualizer.zoomFit();
@@ -900,9 +914,6 @@ class VisualizerWidget extends PureComponent {
       if (this.state.projection !== prevState.projection) {
         this.config.set('projection', this.state.projection);
       }
-      if (this.state.cameraMode !== prevState.cameraMode) {
-        this.config.set('cameraMode', this.state.cameraMode);
-      }
       if (this.state.gcode.displayName !== prevState.gcode.displayName) {
         this.config.set('gcode.displayName', this.state.gcode.displayName);
       }
@@ -917,6 +928,18 @@ class VisualizerWidget extends PureComponent {
       }
       if (this.state.objects.cuttingTool.visible !== prevState.objects.cuttingTool.visible) {
         this.config.set('objects.cuttingTool.visible', this.state.objects.cuttingTool.visible);
+      }
+      if (this.state.objects.stock.visible !== prevState.objects.stock.visible) {
+        this.config.set('objects.stock.visible', this.state.objects.stock.visible);
+      }
+      if (
+        this.state.objects.stock.width !== prevState.objects.stock.width ||
+        this.state.objects.stock.length !== prevState.objects.stock.length ||
+        this.state.objects.stock.thickness !== prevState.objects.stock.thickness
+      ) {
+        this.config.set('objects.stock.width', this.state.objects.stock.width);
+        this.config.set('objects.stock.length', this.state.objects.stock.length);
+        this.config.set('objects.stock.thickness', this.state.objects.stock.thickness);
       }
     }
 
@@ -990,9 +1013,14 @@ class VisualizerWidget extends PureComponent {
           },
           cuttingTool: {
             visible: this.config.get('objects.cuttingTool.visible', true)
+          },
+          stock: {
+            visible: this.config.get('objects.stock.visible', true),
+            width: this.config.get('objects.stock.width', 0),
+            length: this.config.get('objects.stock.length', 0),
+            thickness: this.config.get('objects.stock.thickness', 0),
           }
         },
-        cameraMode: this.config.get('cameraMode', CAMERA_MODE_PAN),
         cameraPosition: 'top', // 'top', '3d', 'front', 'left', 'right'
         isAgitated: false // Defaults to false
       };
@@ -1100,6 +1128,12 @@ class VisualizerWidget extends PureComponent {
                 actions={actions}
               />
             )}
+            {state.modal.name === MODAL_STOCK_SIZE && (
+              <StockSize
+                state={state}
+                actions={actions}
+              />
+            )}
             <WorkflowControl
               state={state}
               actions={actions}
@@ -1137,7 +1171,6 @@ class VisualizerWidget extends PureComponent {
             <Widget.Footer className={styles.widgetFooter}>
               <SecondaryToolbar
                 is3DView={capable.view3D}
-                cameraMode={state.cameraMode}
                 cameraPosition={state.cameraPosition}
                 camera={actions.camera}
               />

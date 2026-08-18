@@ -12,7 +12,6 @@ import { Button, ButtonToolbar, ButtonGroup } from 'app/components/Buttons';
 import Dropdown, { MenuItem } from 'app/components/Dropdown';
 import { FlexContainer, Row, Col } from 'app/components/GridSystem';
 import Image from 'app/components/Image';
-import Space from 'app/components/Space';
 import { Tooltip } from 'app/components/Tooltip';
 import api from 'app/api';
 import i18n from 'app/lib/i18n';
@@ -25,12 +24,6 @@ import iconRightSideView from './images/camera-right-side-view.png';
 import iconZoomFit from './images/zoom-fit.svg';
 import iconZoomIn from './images/zoom-in.svg';
 import iconZoomOut from './images/zoom-out.svg';
-import iconMoveCamera from './images/move-camera.svg';
-import iconRotateCamera from './images/rotate-camera.svg';
-import {
-  CAMERA_MODE_PAN,
-  CAMERA_MODE_ROTATE
-} from './constants';
 
 // Sentinel eventKey for the "None" item in the machine-profile dropdown.
 const CLEAR_MACHINE_PROFILE = '__clear__';
@@ -90,10 +83,6 @@ const IconButton = styled(Button)`
 class SecondaryToolbar extends PureComponent {
     static propTypes = {
       is3DView: PropTypes.bool,
-      cameraMode: PropTypes.oneOf([
-        CAMERA_MODE_PAN,
-        CAMERA_MODE_ROTATE,
-      ]),
       cameraPosition: PropTypes.oneOf(['top', '3d', 'front', 'left', 'right']),
       camera: PropTypes.object,
     };
@@ -176,7 +165,7 @@ class SecondaryToolbar extends PureComponent {
     }
 
     render() {
-      const { is3DView, cameraMode, cameraPosition, camera } = this.props;
+      const { is3DView, cameraPosition, camera } = this.props;
       const { machineProfile, machineProfiles } = this.state;
       const selectedMachineProfile = _find(machineProfiles, {
         id: _get(machineProfile, 'id')
@@ -340,53 +329,6 @@ class SecondaryToolbar extends PureComponent {
                       </Tooltip>
                     </Repeatable>
                   </ButtonGroup>
-                  <Dropdown
-                    componentClass={ButtonGroup}
-                    style={{ marginLeft: 0 }}
-                    dropup
-                    pullRight
-                    onSelect={eventKey => {
-                      if (eventKey === CAMERA_MODE_PAN) {
-                        camera.toPanMode();
-                      } else if (eventKey === CAMERA_MODE_ROTATE) {
-                        camera.toRotateMode();
-                      }
-                    }}
-                  >
-                    <Dropdown.Toggle
-                      aria-label={cameraMode === CAMERA_MODE_PAN ? 'Camera mode: Pan' : 'Camera mode: Rotate'}
-                      componentClass={IconButton}
-                    >
-                      {(cameraMode === CAMERA_MODE_PAN) && (
-                        <Image
-                          aria-hidden="true"
-                          src={iconMoveCamera}
-                          width="20"
-                          height="20"
-                        />
-                      )}
-                      {(cameraMode === CAMERA_MODE_ROTATE) && (
-                        <Image
-                          aria-hidden="true"
-                          src={iconRotateCamera}
-                          width="20"
-                          height="20"
-                        />
-                      )}
-                    </Dropdown.Toggle>
-                    <Dropdown.Menu>
-                      <MenuItem eventKey={CAMERA_MODE_PAN}>
-                        <Image src={iconMoveCamera} width="20" height="20" />
-                        <Space width="4" />
-                        {i18n._('Move the camera')}
-                      </MenuItem>
-                      <MenuItem eventKey={CAMERA_MODE_ROTATE}>
-                        <Image src={iconRotateCamera} width="20" height="20" />
-                        <Space width="4" />
-                        {i18n._('Rotate the camera')}
-                      </MenuItem>
-                    </Dropdown.Menu>
-                  </Dropdown>
                 </ButtonToolbar>
               )}
             </Col>
