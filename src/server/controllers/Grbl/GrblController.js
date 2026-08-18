@@ -174,6 +174,22 @@ class GrblController {
       // contact position along probeAxis (see the 'PRB' handler)
       probeCompensation: 0,
 
+      // Touches recorded for the point currently in progress (2-touch
+      // cycle: fast find, back off, slow confirm). Cleared once the point
+      // is finalized -- only the 2nd (slow) touch is kept in
+      // probedPositions, the 1st is only used for the fast approach.
+      currentTouches: [],
+
+      // Number of 'ok' responses still owed to us for G-code already
+      // queued (incremented by queueEdgeProbePoint, decremented in the
+      // 'ok' handler). probePoints/probedPositions alone go "complete" the
+      // instant the last point's final PRB arrives -- but that point's
+      // trailing retract move is still queued behind it and needs its own
+      // 'ok' to be routed correctly too. This counter keeps the cycle
+      // considered active through that last retract, closing the one gap
+      // the points-remaining comparison can't see.
+      pendingAcks: 0,
+
       // The line fit computed once all points are probed:
       // { slope, intercept, angleRad, angleDeg }
       result: null,
@@ -654,6 +670,31 @@ class GrblController {
       });
 
       this.runner.on('ok', (res) => {
+        // A custom probe cycle always uses the feeder directly, never the
+        // sender/workflow (that's for loaded G-code programs) -- and it
+        // takes absolute priority here, checked before even the $G
+        // parser-state reply tracking below. A $G query can already be in
+        // flight (sent moments before the cycle started) with its
+        // [GC:...]+ok reply arriving mid-cycle; since that reply is
+        // consumed by matching against a flag rather than by content, it
+        // can land on -- and swallow -- the probe's own 'ok' regardless of
+        // the isProbeCycleActive() guard in queryParserState() below (that
+        // guard only stops *new* queries from being sent during a cycle,
+        // it can't un-send one already on the wire). Reordering so probe
+        // cycles always win removes the ambiguity entirely: while a cycle
+        // is active, every incoming 'ok' goes to the feeder, full stop.
+        // Sending feeder.next() an extra time for a stray reply is a
+        // harmless no-op once the queue is actually empty, and grblHAL
+        // still executes our lines in the order it received them
+        // regardless of when they were written -- unlike silently
+        // stalling the cycle right after a touch with no error reported.
+        if (this.isProbeCycleActive()) {
+          this.edgeProbeState.pendingAcks = Math.max(0, this.edgeProbeState.pendingAcks - 1);
+          this.emit('serialport:read', res.raw);
+          this.feeder.next();
+          return;
+        }
+
         if (this.actionMask.queryParserState.reply) {
           if (this.actionMask.replyParserState) {
             this.actionMask.replyParserState = false;
@@ -861,42 +902,79 @@ class GrblController {
               }
             }
 
-            // Track probe data if an edge-probe cycle is active
+            // Track probe data if an edge-probe cycle is active. Each point
+            // is probed twice (see queueEdgeProbePoint): a fast touch to
+            // find the edge, then -- after backing off -- a slow touch to
+            // the same target for an accurate, repeatable reading. Only
+            // the 2nd (slow) touch is kept for the line fit; the 1st is
+            // acknowledged to the client (for live feedback / verification)
+            // but otherwise discarded.
             if (this.edgeProbeState.probePoints.length > 0 && this.edgeProbeState.probedPositions.length < this.edgeProbeState.probePoints.length) {
-              // Correct for the ball-tip stylus radius: the reported
-              // position is where the ball CENTER was at the moment of
-              // contact, offset from the true surface by the radius in the
-              // direction of travel (probeCompensation already carries the
-              // correct sign -- see edgeprobe:start).
+              const state = this.edgeProbeState;
+              const pointIndex = state.probedPositions.length;
+
+              state.currentTouches = [...state.currentTouches, { ...probedPos }];
+              const touchIndex = state.currentTouches.length; // 1 = fast, 2 = slow
+
+              log.debug(`[edgeprobe] Point ${pointIndex + 1}/${state.probePoints.length} touch ${touchIndex}/2: posX=${probedPos.x.toFixed(3)}, posY=${probedPos.y.toFixed(3)}, posZ=${probedPos.z.toFixed(3)}`);
+
+              this.emit('edgeprobe:touch', {
+                point: pointIndex,
+                total: state.probePoints.length,
+                touch: touchIndex,
+                touchesPerPoint: 2,
+                pos: { ...probedPos },
+              });
+
+              if (touchIndex < 2) {
+                // Fast touch done -- the queued G-code already backs off
+                // and re-approaches slowly on its own, nothing more to do
+                // here until the slow touch's PRB report arrives.
+                return;
+              }
+
+              // Slow (2nd) touch is the trusted reading. Correct for the
+              // ball-tip stylus radius: the reported position is where the
+              // ball CENTER was at contact, offset from the true surface
+              // by the radius in the direction of travel (probeCompensation
+              // already carries the correct sign -- see edgeprobe:start).
+              const finalTouch = state.currentTouches[1];
               const compensatedPos = {
-                ...probedPos,
-                [this.edgeProbeState.probeAxis]: probedPos[this.edgeProbeState.probeAxis] + this.edgeProbeState.probeCompensation,
+                ...finalTouch,
+                [state.probeAxis]: finalTouch[state.probeAxis] + state.probeCompensation,
               };
-              const newProbedPositions = [...this.edgeProbeState.probedPositions, compensatedPos];
-              const isCompleted = newProbedPositions.length >= this.edgeProbeState.probePoints.length;
+              const newProbedPositions = [...state.probedPositions, compensatedPos];
+              const isCompleted = newProbedPositions.length >= state.probePoints.length;
 
-              this.edgeProbeState.probedPositions = newProbedPositions;
-
-              log.debug(`[edgeprobe] Probed ${newProbedPositions.length}/${this.edgeProbeState.probePoints.length}: posX=${compensatedPos.x.toFixed(3)}, posY=${compensatedPos.y.toFixed(3)}, posZ=${compensatedPos.z.toFixed(3)}`);
+              state.probedPositions = newProbedPositions;
+              state.currentTouches = [];
 
               this.emit('edgeprobe:update', {
                 current: newProbedPositions.length,
-                total: this.edgeProbeState.probePoints.length,
+                total: state.probePoints.length,
                 probedPos: { ...compensatedPos },
               });
 
               if (isCompleted) {
-                const { lineAxis, probeAxis } = this.edgeProbeState;
+                const { lineAxis, probeAxis } = state;
                 const pairs = newProbedPositions.map((p) => [p[lineAxis], p[probeAxis]]);
                 const fit = edgeprobe.fitLine(pairs);
 
-                this.edgeProbeState.result = fit;
+                state.result = fit;
 
                 this.emit('edgeprobe:complete', {
                   positions: newProbedPositions,
                   fit,
                 });
                 log.info('[edgeprobe] Probing completed:', fit);
+              } else {
+                const nextIndex = newProbedPositions.length;
+                this.emit('edgeprobe:phase', {
+                  point: nextIndex,
+                  total: state.probePoints.length,
+                  phase: 'moving',
+                });
+                this.queueEdgeProbePoint(nextIndex);
               }
             }
 
@@ -955,6 +1033,35 @@ class GrblController {
               });
               log.info(`[rectprobe:${this.rectProbeState.mode}] Probing completed:`, result);
             }
+          } else if (this.edgeProbeState.probePoints.length > 0 && this.edgeProbeState.probedPositions.length < this.edgeProbeState.probePoints.length) {
+            // Probe failed to make contact within the configured travel
+            // (G38.2 target reached with no trigger). Without this, the
+            // cycle would hang forever waiting for a PRB report that will
+            // never come -- indistinguishable from the machine actually
+            // being stuck.
+            const state = this.edgeProbeState;
+            const pointIndex = state.probedPositions.length;
+            const touchIndex = state.currentTouches.length + 1;
+
+            log.error(`[edgeprobe] Point ${pointIndex + 1}/${state.probePoints.length} touch ${touchIndex}/2 failed to make contact`);
+
+            this.emit('edgeprobe:failed', {
+              point: pointIndex,
+              total: state.probePoints.length,
+              touch: touchIndex,
+            });
+
+            this.edgeProbeState = {
+              probedPositions: [],
+              probePoints: [],
+              lineAxis: null,
+              probeAxis: null,
+              probeCompensation: 0,
+              currentTouches: [],
+              pendingAcks: 0,
+              result: null,
+              config: null,
+            };
           }
         }
       });
@@ -1051,6 +1158,14 @@ class GrblController {
         }
 
         const now = new Date().getTime();
+
+        // Do not query parser state ($G) while a custom probe cycle is
+        // mid-flight -- it's a write independent of the feeder's
+        // send/wait-for-ok sequencing, and can desync it if it lands while
+        // a probe G-code line is in flight (see isProbeCycleActive).
+        if (this.isProbeCycleActive()) {
+          return;
+        }
 
         // Do not force query parser state ($G) when running a G-code program,
         // it will consume 3 bytes from the receive buffer in each time period.
@@ -1254,6 +1369,87 @@ class GrblController {
       this.actionTime.queryParserState = 0;
       this.actionTime.queryStatusReport = 0;
       this.actionTime.senderFinishTime = 0;
+    }
+
+    // True while any custom probe cycle (edge/corner/circle/rect/autolevel)
+    // is mid-flight -- either still waiting on PRB reports (points
+    // remaining), or (edge probe only) still owed 'ok's for G-code already
+    // queued via pendingAcks, which stays true a little longer than the
+    // points comparison alone: the last point's PRB can arrive (completing
+    // probedPositions) before that point's own trailing retract has been
+    // acknowledged, so a plain points-remaining check would let go one
+    // 'ok' too early.
+    //
+    // Used for two things: (1) suppressing the periodic $G parser-state
+    // poll below -- that poll writes directly to the serial port on its
+    // own timer, independent of the feeder's send/wait-for-ok sequencing,
+    // and if it lands while a probe G-code line is in flight its reply can
+    // be consumed as if it were that line's 'ok' (or vice versa); (2) in
+    // the 'ok' handler, routing 'ok's straight to the feeder regardless of
+    // whatever workflow/sender state happens to be lingering from an
+    // unrelated program load elsewhere in the app. Either race silently
+    // desyncs the feeder: the machine goes idle but the next queued line
+    // (e.g. the retract/backoff move right after a touch) is never sent,
+    // with no error reported -- indistinguishable from the machine
+    // actually being stuck.
+    isProbeCycleActive() {
+      const isPending = (state) => (
+        state.probePoints.length > 0 && state.probedPositions.length < state.probePoints.length
+      );
+      return (
+        isPending(this.probeState) ||
+        (this.edgeProbeState.pendingAcks > 0) ||
+        isPending(this.edgeProbeState) ||
+        isPending(this.cornerProbeState) ||
+        isPending(this.circleProbeState) ||
+        isPending(this.rectProbeState)
+      );
+    }
+
+    // Queues one edge-probe sample point's 2-touch G-code: rapid to the
+    // approach position, fast touch toward the target, back off, then a
+    // slow touch to the same target for an accurate/repeatable reading,
+    // then a final safety retract. Called once at edgeprobe:start (for
+    // point 0) and again from the PRB handler each time a point's slow
+    // touch completes (for the next point) -- one point's G-code is
+    // queued at a time so the client gets a live 'edgeprobe:phase'/
+    // 'edgeprobe:touch' event at each real transition, instead of the
+    // whole cycle being opaque once streamed.
+    queueEdgeProbePoint(index) {
+      const state = this.edgeProbeState;
+      const point = state.probePoints[index];
+      if (!point) {
+        return;
+      }
+
+      const { probeAxis, config } = state;
+      const AXIS = probeAxis.toUpperCase();
+      const target = point[probeAxis] + config.probeDistance;
+      const backoff = -Math.sign(config.probeDistance) * config.backoffDistance;
+
+      const gcode = [
+        `(Edge Probe: point ${index}, touch 1/2 - fast)`,
+        'G90',
+        `G0 X${point.x} Y${point.y}`,
+        `G38.2 ${AXIS}${target} F${config.feedrate}`,
+        'G91',
+        `G0 ${AXIS}${backoff}`,
+        'G90',
+        `G4 P${config.settleDelay}`,
+        `(Edge Probe: point ${index}, touch 2/2 - slow)`,
+        `G38.2 ${AXIS}${target} F${config.slowFeedrate}`,
+        'G91',
+        `G0 ${AXIS}${config.retractDistance}`,
+        'G90',
+      ];
+
+      // Every non-comment line will earn exactly one 'ok' from the
+      // controller -- comments are stripped and never transmitted, so
+      // they never generate one (see the feeder's dataFilter).
+      const realLineCount = gcode.filter((line) => !line.trim().startsWith('(')).length;
+      state.pendingAcks += realLineCount;
+
+      this.command('gcode', gcode);
     }
 
     // Shared accumulation step for the corner/circle/rect probe cycles
@@ -2073,6 +2269,9 @@ class GrblController {
             pointCount,
             probeDistance,
             feedrate,
+            slowFeedrate,
+            backoffDistance,
+            settleDelay = 0.3,
             retractDistance,
             probeRadius = 0,
           } = params;
@@ -2090,6 +2289,8 @@ class GrblController {
             lineAxis,
             probeAxis,
             probeCompensation: probeRadius * Math.sign(probeDistance),
+            currentTouches: [],
+            pendingAcks: 0,
             result: null,
             config: {
               lineAxis,
@@ -2099,33 +2300,18 @@ class GrblController {
               pointCount,
               probeDistance,
               feedrate,
+              slowFeedrate,
+              backoffDistance,
+              settleDelay,
               retractDistance,
               probeRadius,
             },
           };
 
-          log.info(`[edgeprobe:start] Start probing with ${points.length} points along ${lineAxis}, probing ${probeAxis}`);
+          log.info(`[edgeprobe:start] Start probing with ${points.length} points along ${lineAxis}, probing ${probeAxis} (fast=${feedrate}, slow=${slowFeedrate}, backoff=${backoffDistance}, settle=${settleDelay})`);
 
-          // Generate probe G-code: for each sample point along the line,
-          // move there, probe toward it along probeAxis by probeDistance
-          // (an absolute target = point[probeAxis] + probeDistance, since
-          // we stay in G90 throughout), then back off by retractDistance
-          // before moving on to the next point.
-          const AXIS = probeAxis.toUpperCase();
-          const probeGCodes = [];
-          points.forEach((point, index) => {
-            const probeTarget = point[probeAxis] + probeDistance;
-
-            probeGCodes.push(`(Edge Probe: point ${index})`);
-            probeGCodes.push('G90');
-            probeGCodes.push(`G0 X${point.x} Y${point.y}`);
-            probeGCodes.push(`G38.2 ${AXIS}${probeTarget} F${feedrate}`);
-            probeGCodes.push('G91');
-            probeGCodes.push(`G0 ${AXIS}${retractDistance}`);
-            probeGCodes.push('G90');
-          });
-
-          this.command('gcode', probeGCodes);
+          this.emit('edgeprobe:phase', { point: 0, total: points.length, phase: 'moving' });
+          this.queueEdgeProbePoint(0);
         },
         'edgeprobe:stop': () => {
           // Reset the machine to cancel the probe cycle immediately
@@ -2138,6 +2324,8 @@ class GrblController {
             lineAxis: null,
             probeAxis: null,
             probeCompensation: 0,
+            currentTouches: [],
+            pendingAcks: 0,
             result: null,
             config: null,
           };

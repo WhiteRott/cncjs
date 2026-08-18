@@ -80,6 +80,15 @@ class ProbingCyclesWidget extends PureComponent {
       setProbeFeedrate: (value) => {
         this.setState({ probeFeedrate: value });
       },
+      setSlowProbeFeedrate: (value) => {
+        this.setState({ slowProbeFeedrate: value });
+      },
+      setBackoffDistance: (value) => {
+        this.setState({ backoffDistance: value });
+      },
+      setSettleDelay: (value) => {
+        this.setState({ settleDelay: value });
+      },
       setRetractDistance: (value) => {
         this.setState({ retractDistance: value });
       },
@@ -91,6 +100,9 @@ class ProbingCyclesWidget extends PureComponent {
           pointCount,
           probeDistance,
           probeFeedrate,
+          slowProbeFeedrate,
+          backoffDistance,
+          settleDelay,
           retractDistance,
           probeTipDiameter,
         } = this.state;
@@ -105,6 +117,9 @@ class ProbingCyclesWidget extends PureComponent {
         this.setState({
           isProbing: true,
           progress: { current: 0, total: pointCount },
+          phase: 'moving',
+          touchLog: [],
+          error: null,
           result: null,
         });
 
@@ -116,13 +131,16 @@ class ProbingCyclesWidget extends PureComponent {
           pointCount,
           probeDistance: dir.sign * probeDistance,
           feedrate: probeFeedrate,
+          slowFeedrate: slowProbeFeedrate,
+          backoffDistance,
+          settleDelay,
           retractDistance: -dir.sign * retractDistance,
           probeRadius: probeTipDiameter / 2,
         });
       },
       stopProbe: () => {
         controller.command('edgeprobe:stop');
-        this.setState({ isProbing: false });
+        this.setState({ isProbing: false, phase: null });
       },
     };
 
@@ -147,7 +165,7 @@ class ProbingCyclesWidget extends PureComponent {
 
         if (type === GRBL) {
           const { status, parserstate } = { ...state };
-          const { mpos, wpos } = { ...status };
+          const { mpos, wpos, pinState } = { ...status };
           const { modal = {} } = { ...parserstate };
           units = {
             'G20': IMPERIAL_UNITS,
@@ -157,6 +175,7 @@ class ProbingCyclesWidget extends PureComponent {
           this.setState({
             machinePosition: { ...this.state.machinePosition, ...mpos },
             workPosition: { ...this.state.workPosition, ...wpos },
+            probeTriggered: String(pinState || '').includes('P'),
           });
         }
 
@@ -172,15 +191,36 @@ class ProbingCyclesWidget extends PureComponent {
           },
         });
       },
+      'edgeprobe:phase': (data) => {
+        const { point, total, phase } = data;
+        this.setState({
+          phase,
+          progress: { current: point, total },
+        });
+      },
+      'edgeprobe:touch': (data) => {
+        this.setState(state => ({
+          touchLog: [...state.touchLog, data],
+          phase: (data.touch < data.touchesPerPoint) ? 'probing-fast' : 'probing-slow',
+        }));
+      },
       'edgeprobe:update': (data) => {
         const { current, total } = data;
         this.setState({
           progress: { current, total },
         });
       },
+      'edgeprobe:failed': (data) => {
+        this.setState({
+          isProbing: false,
+          phase: null,
+          error: data,
+        });
+      },
       'edgeprobe:complete': (data) => {
         this.setState({
           isProbing: false,
+          phase: null,
           result: data,
         });
       },
@@ -229,12 +269,21 @@ class ProbingCyclesWidget extends PureComponent {
       this.config.set('direction', direction);
       this.config.set('pointCount', pointCount);
 
-      let { probeDistance, probeFeedrate, retractDistance, probeTipDiameter } = this.state;
+      let {
+        probeDistance,
+        probeFeedrate,
+        slowProbeFeedrate,
+        backoffDistance,
+        retractDistance,
+        probeTipDiameter,
+      } = this.state;
       let savedStartPoint = startPoint;
       let savedEndPoint = endPoint;
       if (units === IMPERIAL_UNITS) {
         probeDistance = in2mm(probeDistance);
         probeFeedrate = in2mm(probeFeedrate);
+        slowProbeFeedrate = in2mm(slowProbeFeedrate);
+        backoffDistance = in2mm(backoffDistance);
         retractDistance = in2mm(retractDistance);
         probeTipDiameter = in2mm(probeTipDiameter);
         savedStartPoint = { x: in2mm(startPoint.x), y: in2mm(startPoint.y) };
@@ -242,10 +291,16 @@ class ProbingCyclesWidget extends PureComponent {
       }
       this.config.set('probeDistance', Number(probeDistance));
       this.config.set('probeFeedrate', Number(probeFeedrate));
+      this.config.set('slowProbeFeedrate', Number(slowProbeFeedrate));
+      this.config.set('backoffDistance', Number(backoffDistance));
       this.config.set('retractDistance', Number(retractDistance));
       this.config.set('probeTipDiameter', Number(probeTipDiameter));
       this.config.set('startPoint', savedStartPoint);
       this.config.set('endPoint', savedEndPoint);
+
+      // settleDelay is a duration (seconds), not a length -- not subject
+      // to the mm/in conversion above.
+      this.config.set('settleDelay', Number(this.state.settleDelay));
     }
 
     getInitialState() {
@@ -266,6 +321,7 @@ class ProbingCyclesWidget extends PureComponent {
         },
         machinePosition: { x: 0, y: 0, z: 0 },
         workPosition: { x: 0, y: 0, z: 0 },
+        probeTriggered: false,
         direction: this.config.get('direction', 'x+'),
         startPoint: {
           x: mapValueToUnits(savedStartPoint.x, METRIC_UNITS),
@@ -277,12 +333,18 @@ class ProbingCyclesWidget extends PureComponent {
         },
         pointCount: this.config.get('pointCount', 3),
         probeDistance: Number(this.config.get('probeDistance') || 10),
-        probeFeedrate: Number(this.config.get('probeFeedrate') || 50),
+        probeFeedrate: Number(this.config.get('probeFeedrate') || 100),
+        slowProbeFeedrate: Number(this.config.get('slowProbeFeedrate') || 10),
+        backoffDistance: Number(this.config.get('backoffDistance') || 2),
+        settleDelay: Number(this.config.get('settleDelay') ?? 0.3),
         retractDistance: Number(this.config.get('retractDistance') || 2),
         probeTipDiameter: Number(this.config.get('probeTipDiameter') || 0),
         toolProbeLength: 0,
         toolProbeMaxDeflection: 0,
         isProbing: false,
+        phase: null,
+        touchLog: [],
+        error: null,
         progress: { current: 0, total: 0 },
         result: null,
       };

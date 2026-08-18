@@ -71,14 +71,21 @@ class EdgeSkewProbe extends PureComponent {
         pointCount,
         probeDistance,
         probeFeedrate,
+        slowProbeFeedrate,
+        backoffDistance,
+        settleDelay,
         retractDistance,
         probeTipDiameter,
         toolProbeLength,
         toolProbeMaxDeflection,
         exceedsMaxDeflection,
         isProbing,
+        phase,
+        touchLog,
+        error,
         progress,
         result,
+        probeTriggered,
       } = state;
       const displayUnits = (units === 'in') ? i18n._('in') : i18n._('mm');
       const feedrateUnits = (units === 'in') ? i18n._('in/min') : i18n._('mm/min');
@@ -86,6 +93,27 @@ class EdgeSkewProbe extends PureComponent {
 
       return (
         <div>
+          <div
+            className="form-group"
+            style={{ display: 'flex', alignItems: 'center', columnGap: 8 }}
+          >
+            <span
+              style={{
+                display: 'inline-block',
+                width: 12,
+                height: 12,
+                borderRadius: '50%',
+                backgroundColor: probeTriggered ? '#d9534f' : '#5cb85c',
+                boxShadow: probeTriggered ? '0 0 4px #d9534f' : 'none',
+              }}
+            />
+            <span>
+              {probeTriggered
+                ? i18n._('Probe: TOUCHING')
+                : i18n._('Probe: clear')}
+            </span>
+          </div>
+
           <div className="form-group">
             <label className="control-label">{i18n._('Probe Direction')}</label>
             <div className="btn-group btn-group-sm" style={{ display: 'flex' }}>
@@ -170,7 +198,7 @@ class EdgeSkewProbe extends PureComponent {
           <div className="row no-gutters">
             <div className="col-xs-6" style={{ paddingRight: 5 }}>
               <div className="form-group">
-                <label className="control-label">{i18n._('Probe Feedrate')}</label>
+                <label className="control-label">{i18n._('Fast Probe Feedrate')}</label>
                 <div className="input-group input-group-sm">
                   <input
                     type="number"
@@ -182,6 +210,46 @@ class EdgeSkewProbe extends PureComponent {
                     onChange={(event) => actions.setProbeFeedrate(Number(event.target.value) || 0)}
                   />
                   <span className="input-group-addon">{feedrateUnits}</span>
+                </div>
+              </div>
+            </div>
+            <div className="col-xs-6" style={{ paddingLeft: 5 }}>
+              <div className="form-group">
+                <label className="control-label">{i18n._('Slow Probe Feedrate')}</label>
+                <div className="input-group input-group-sm">
+                  <input
+                    type="number"
+                    className="form-control"
+                    min={0}
+                    step={step}
+                    disabled={isProbing}
+                    value={slowProbeFeedrate}
+                    onChange={(event) => actions.setSlowProbeFeedrate(Number(event.target.value) || 0)}
+                  />
+                  <span className="input-group-addon">{feedrateUnits}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+          <p style={{ marginTop: -4, marginBottom: 12 }}>
+            <i>{i18n._('Each point is touched twice: a fast approach to find the edge, then — after backing off — a slower touch to the same target for an accurate, repeatable reading. Only the slow touch is used for the result.')}</i>
+          </p>
+
+          <div className="row no-gutters">
+            <div className="col-xs-6" style={{ paddingRight: 5 }}>
+              <div className="form-group">
+                <label className="control-label">{i18n._('Back-off Distance')}</label>
+                <div className="input-group input-group-sm">
+                  <input
+                    type="number"
+                    className="form-control"
+                    min={0}
+                    step={step}
+                    disabled={isProbing}
+                    value={backoffDistance}
+                    onChange={(event) => actions.setBackoffDistance(Number(event.target.value) || 0)}
+                  />
+                  <span className="input-group-addon">{displayUnits}</span>
                 </div>
               </div>
             </div>
@@ -203,6 +271,29 @@ class EdgeSkewProbe extends PureComponent {
               </div>
             </div>
           </div>
+
+          <div className="row no-gutters">
+            <div className="col-xs-6" style={{ paddingRight: 5 }}>
+              <div className="form-group">
+                <label className="control-label">{i18n._('Settle Delay')}</label>
+                <div className="input-group input-group-sm">
+                  <input
+                    type="number"
+                    className="form-control"
+                    min={0}
+                    step={0.1}
+                    disabled={isProbing}
+                    value={settleDelay}
+                    onChange={(event) => actions.setSettleDelay(Number(event.target.value) || 0)}
+                  />
+                  <span className="input-group-addon">{i18n._('s')}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+          <p style={{ marginTop: -4, marginBottom: 12 }}>
+            <i>{i18n._('Pause after backing off, before the slow touch, to let vibration from the fast touch settle out.')}</i>
+          </p>
 
           <div className="form-group">
             <label className="control-label">{i18n._('Probe Tip Diameter')}</label>
@@ -246,11 +337,61 @@ class EdgeSkewProbe extends PureComponent {
           {isProbing && progress.total > 0 && (
             <div className="form-group">
               <i>
-                {i18n._('Probing point {{current}} of {{total}}...', {
+                {phase === 'moving' && i18n._('Point {{current}} of {{total}}: moving into position...', {
+                  current: progress.current + 1,
+                  total: progress.total,
+                })}
+                {phase === 'probing-fast' && i18n._('Point {{current}} of {{total}}: fast touch (finding the edge)...', {
+                  current: progress.current + 1,
+                  total: progress.total,
+                })}
+                {phase === 'probing-slow' && i18n._('Point {{current}} of {{total}}: slow touch (confirming)...', {
+                  current: progress.current + 1,
+                  total: progress.total,
+                })}
+                {!phase && i18n._('Probing point {{current}} of {{total}}...', {
                   current: progress.current,
                   total: progress.total,
                 })}
               </i>
+            </div>
+          )}
+
+          {isProbing && touchLog.length > 0 && (
+            <div className="form-group">
+              <label className="control-label">{i18n._('Touch Log')}</label>
+              <table className="table" style={{ marginTop: 4 }}>
+                <thead>
+                  <tr>
+                    <th>{i18n._('Point')}</th>
+                    <th>{i18n._('Touch')}</th>
+                    <th>X</th>
+                    <th>Y</th>
+                    <th>Z</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {touchLog.map((t, index) => (
+                    <tr key={index}>
+                      <td>{t.point + 1}</td>
+                      <td>{(t.touch < t.touchesPerPoint) ? i18n._('fast') : i18n._('slow')}</td>
+                      <td>{mapValueToUnits(t.pos.x, units).toFixed(3)}</td>
+                      <td>{mapValueToUnits(t.pos.y, units).toFixed(3)}</td>
+                      <td>{mapValueToUnits(t.pos.z, units).toFixed(3)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {!isProbing && error && (
+            <div className="alert alert-danger" style={{ padding: '6px 10px', marginBottom: 12 }}>
+              {i18n._('Point {{point}} of {{total}} failed: the {{touch}} touch did not make contact within Probe Distance. Check positioning and re-run.', {
+                point: error.point + 1,
+                total: error.total,
+                touch: (error.touch < 2) ? i18n._('fast') : i18n._('slow'),
+              })}
             </div>
           )}
 
