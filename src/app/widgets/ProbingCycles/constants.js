@@ -7,3 +7,9 @@ export const PROBE_DIRECTIONS = [
   { value: 'y+', label: '+Y', probeAxis: 'y', lineAxis: 'x', sign: 1 },
   { value: 'y-', label: '-Y', probeAxis: 'y', lineAxis: 'x', sign: -1 },
 ];
+
+// Which cycle the widget is currently configured to run.
+export const PROBE_TYPES = [
+  { value: 'edge', label: 'Edge / Skew' },
+  { value: 'corner', label: 'Corner' },
+];

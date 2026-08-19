@@ -13,6 +13,7 @@ import log from 'app/lib/log';
 import { in2mm, mapValueToUnits } from 'app/lib/units';
 import WidgetConfig from '../WidgetConfig';
 import EdgeSkewProbe from './EdgeSkewProbe';
+import CornerProbe from './CornerProbe';
 import {
   // Units
   IMPERIAL_UNITS,
@@ -23,7 +24,7 @@ import {
   // Workflow
   WORKFLOW_STATE_IDLE
 } from '../../constants';
-import { PROBE_DIRECTIONS } from './constants';
+import { PROBE_DIRECTIONS, PROBE_TYPES } from './constants';
 import styles from './index.styl';
 
 class ProbingCyclesWidget extends PureComponent {
@@ -59,8 +60,14 @@ class ProbingCyclesWidget extends PureComponent {
         const { minimized } = this.state;
         this.setState({ minimized: !minimized });
       },
+      setProbeType: (value) => {
+        this.setState({ probeType: value });
+      },
       setDirection: (value) => {
         this.setState({ direction: value });
+      },
+      setEdgeField: (edgePrefix, field, value) => {
+        this.setState({ [`${edgePrefix}${field}`]: value });
       },
       setStartPoint: (point) => {
         this.setState({ startPoint: point });
@@ -140,6 +147,70 @@ class ProbingCyclesWidget extends PureComponent {
       },
       stopProbe: () => {
         controller.command('edgeprobe:stop');
+        this.setState({ isProbing: false, phase: null });
+      },
+      startCornerProbe: () => {
+        const {
+          xEdgeDirection,
+          xEdgeStartPoint,
+          xEdgeEndPoint,
+          xEdgePointCount,
+          xEdgeProbeDistance,
+          xEdgeRetractDistance,
+          yEdgeDirection,
+          yEdgeStartPoint,
+          yEdgeEndPoint,
+          yEdgePointCount,
+          yEdgeProbeDistance,
+          yEdgeRetractDistance,
+          probeFeedrate,
+          slowProbeFeedrate,
+          backoffDistance,
+          settleDelay,
+          probeTipDiameter,
+        } = this.state;
+        const xDir = find(PROBE_DIRECTIONS, { value: xEdgeDirection });
+        const yDir = find(PROBE_DIRECTIONS, { value: yEdgeDirection });
+        if (!xDir || !yDir) {
+          return;
+        }
+        if (this.exceedsCornerMaxDeflection()) {
+          return;
+        }
+
+        this.setState({
+          isProbing: true,
+          progress: { current: 0, total: xEdgePointCount + yEdgePointCount },
+          phase: 'moving',
+          touchLog: [],
+          error: null,
+          result: null,
+        });
+
+        controller.command('cornerprobe:start', {
+          xEdge: {
+            start: xEdgeStartPoint,
+            end: xEdgeEndPoint,
+            pointCount: xEdgePointCount,
+            probeDistance: xDir.sign * xEdgeProbeDistance,
+            retractDistance: -xDir.sign * xEdgeRetractDistance,
+          },
+          yEdge: {
+            start: yEdgeStartPoint,
+            end: yEdgeEndPoint,
+            pointCount: yEdgePointCount,
+            probeDistance: yDir.sign * yEdgeProbeDistance,
+            retractDistance: -yDir.sign * yEdgeRetractDistance,
+          },
+          feedrate: probeFeedrate,
+          slowFeedrate: slowProbeFeedrate,
+          backoffDistance,
+          settleDelay,
+          probeRadius: probeTipDiameter / 2,
+        });
+      },
+      stopCornerProbe: () => {
+        controller.command('cornerprobe:stop');
         this.setState({ isProbing: false, phase: null });
       },
     };
@@ -224,6 +295,39 @@ class ProbingCyclesWidget extends PureComponent {
           result: data,
         });
       },
+      'cornerprobe:phase': (data) => {
+        const { point, total, phase } = data;
+        this.setState({
+          phase,
+          progress: { current: point, total },
+        });
+      },
+      'cornerprobe:touch': (data) => {
+        this.setState(state => ({
+          touchLog: [...state.touchLog, data],
+          phase: (data.touch < data.touchesPerPoint) ? 'probing-fast' : 'probing-slow',
+        }));
+      },
+      'cornerprobe:update': (data) => {
+        const { current, total } = data;
+        this.setState({
+          progress: { current, total },
+        });
+      },
+      'cornerprobe:failed': (data) => {
+        this.setState({
+          isProbing: false,
+          phase: null,
+          error: data,
+        });
+      },
+      'cornerprobe:complete': (data) => {
+        this.setState({
+          isProbing: false,
+          phase: null,
+          result: data,
+        });
+      },
     };
 
     unitsDidChange = false;
@@ -261,13 +365,23 @@ class ProbingCyclesWidget extends PureComponent {
 
       const {
         units,
+        probeType,
         direction,
         startPoint,
         endPoint,
         pointCount,
+        xEdgeDirection,
+        xEdgePointCount,
+        yEdgeDirection,
+        yEdgePointCount,
       } = this.state;
+      this.config.set('probeType', probeType);
       this.config.set('direction', direction);
       this.config.set('pointCount', pointCount);
+      this.config.set('xEdgeDirection', xEdgeDirection);
+      this.config.set('xEdgePointCount', xEdgePointCount);
+      this.config.set('yEdgeDirection', yEdgeDirection);
+      this.config.set('yEdgePointCount', yEdgePointCount);
 
       let {
         probeDistance,
@@ -276,9 +390,18 @@ class ProbingCyclesWidget extends PureComponent {
         backoffDistance,
         retractDistance,
         probeTipDiameter,
+        xEdgeProbeDistance,
+        xEdgeRetractDistance,
+        yEdgeProbeDistance,
+        yEdgeRetractDistance,
       } = this.state;
+      const { xEdgeStartPoint, xEdgeEndPoint, yEdgeStartPoint, yEdgeEndPoint } = this.state;
       let savedStartPoint = startPoint;
       let savedEndPoint = endPoint;
+      let savedXEdgeStartPoint = xEdgeStartPoint;
+      let savedXEdgeEndPoint = xEdgeEndPoint;
+      let savedYEdgeStartPoint = yEdgeStartPoint;
+      let savedYEdgeEndPoint = yEdgeEndPoint;
       if (units === IMPERIAL_UNITS) {
         probeDistance = in2mm(probeDistance);
         probeFeedrate = in2mm(probeFeedrate);
@@ -286,8 +409,16 @@ class ProbingCyclesWidget extends PureComponent {
         backoffDistance = in2mm(backoffDistance);
         retractDistance = in2mm(retractDistance);
         probeTipDiameter = in2mm(probeTipDiameter);
+        xEdgeProbeDistance = in2mm(xEdgeProbeDistance);
+        xEdgeRetractDistance = in2mm(xEdgeRetractDistance);
+        yEdgeProbeDistance = in2mm(yEdgeProbeDistance);
+        yEdgeRetractDistance = in2mm(yEdgeRetractDistance);
         savedStartPoint = { x: in2mm(startPoint.x), y: in2mm(startPoint.y) };
         savedEndPoint = { x: in2mm(endPoint.x), y: in2mm(endPoint.y) };
+        savedXEdgeStartPoint = { x: in2mm(xEdgeStartPoint.x), y: in2mm(xEdgeStartPoint.y) };
+        savedXEdgeEndPoint = { x: in2mm(xEdgeEndPoint.x), y: in2mm(xEdgeEndPoint.y) };
+        savedYEdgeStartPoint = { x: in2mm(yEdgeStartPoint.x), y: in2mm(yEdgeStartPoint.y) };
+        savedYEdgeEndPoint = { x: in2mm(yEdgeEndPoint.x), y: in2mm(yEdgeEndPoint.y) };
       }
       this.config.set('probeDistance', Number(probeDistance));
       this.config.set('probeFeedrate', Number(probeFeedrate));
@@ -297,6 +428,14 @@ class ProbingCyclesWidget extends PureComponent {
       this.config.set('probeTipDiameter', Number(probeTipDiameter));
       this.config.set('startPoint', savedStartPoint);
       this.config.set('endPoint', savedEndPoint);
+      this.config.set('xEdgeProbeDistance', Number(xEdgeProbeDistance));
+      this.config.set('xEdgeRetractDistance', Number(xEdgeRetractDistance));
+      this.config.set('yEdgeProbeDistance', Number(yEdgeProbeDistance));
+      this.config.set('yEdgeRetractDistance', Number(yEdgeRetractDistance));
+      this.config.set('xEdgeStartPoint', savedXEdgeStartPoint);
+      this.config.set('xEdgeEndPoint', savedXEdgeEndPoint);
+      this.config.set('yEdgeStartPoint', savedYEdgeStartPoint);
+      this.config.set('yEdgeEndPoint', savedYEdgeEndPoint);
 
       // settleDelay is a duration (seconds), not a length -- not subject
       // to the mm/in conversion above.
@@ -306,6 +445,10 @@ class ProbingCyclesWidget extends PureComponent {
     getInitialState() {
       const savedStartPoint = this.config.get('startPoint', { x: 0, y: 0 });
       const savedEndPoint = this.config.get('endPoint', { x: 0, y: 100 });
+      const savedXEdgeStartPoint = this.config.get('xEdgeStartPoint', { x: 0, y: 0 });
+      const savedXEdgeEndPoint = this.config.get('xEdgeEndPoint', { x: 0, y: 50 });
+      const savedYEdgeStartPoint = this.config.get('yEdgeStartPoint', { x: 0, y: 0 });
+      const savedYEdgeEndPoint = this.config.get('yEdgeEndPoint', { x: 50, y: 0 });
 
       return {
         minimized: this.config.get('minimized', false),
@@ -322,6 +465,7 @@ class ProbingCyclesWidget extends PureComponent {
         machinePosition: { x: 0, y: 0, z: 0 },
         workPosition: { x: 0, y: 0, z: 0 },
         probeTriggered: false,
+        probeType: this.config.get('probeType', 'edge'),
         direction: this.config.get('direction', 'x+'),
         startPoint: {
           x: mapValueToUnits(savedStartPoint.x, METRIC_UNITS),
@@ -339,6 +483,30 @@ class ProbingCyclesWidget extends PureComponent {
         settleDelay: Number(this.config.get('settleDelay') ?? 0.3),
         retractDistance: Number(this.config.get('retractDistance') || 2),
         probeTipDiameter: Number(this.config.get('probeTipDiameter') || 0),
+        xEdgeDirection: this.config.get('xEdgeDirection', 'x+'),
+        xEdgeStartPoint: {
+          x: mapValueToUnits(savedXEdgeStartPoint.x, METRIC_UNITS),
+          y: mapValueToUnits(savedXEdgeStartPoint.y, METRIC_UNITS),
+        },
+        xEdgeEndPoint: {
+          x: mapValueToUnits(savedXEdgeEndPoint.x, METRIC_UNITS),
+          y: mapValueToUnits(savedXEdgeEndPoint.y, METRIC_UNITS),
+        },
+        xEdgePointCount: this.config.get('xEdgePointCount', 2),
+        xEdgeProbeDistance: Number(this.config.get('xEdgeProbeDistance') || 10),
+        xEdgeRetractDistance: Number(this.config.get('xEdgeRetractDistance') || 2),
+        yEdgeDirection: this.config.get('yEdgeDirection', 'y+'),
+        yEdgeStartPoint: {
+          x: mapValueToUnits(savedYEdgeStartPoint.x, METRIC_UNITS),
+          y: mapValueToUnits(savedYEdgeStartPoint.y, METRIC_UNITS),
+        },
+        yEdgeEndPoint: {
+          x: mapValueToUnits(savedYEdgeEndPoint.x, METRIC_UNITS),
+          y: mapValueToUnits(savedYEdgeEndPoint.y, METRIC_UNITS),
+        },
+        yEdgePointCount: this.config.get('yEdgePointCount', 2),
+        yEdgeProbeDistance: Number(this.config.get('yEdgeProbeDistance') || 10),
+        yEdgeRetractDistance: Number(this.config.get('yEdgeRetractDistance') || 2),
         toolProbeLength: 0,
         toolProbeMaxDeflection: 0,
         isProbing: false,
@@ -394,15 +562,28 @@ class ProbingCyclesWidget extends PureComponent {
       return Math.abs(probeDistance) > toolProbeMaxDeflection;
     }
 
+    exceedsCornerMaxDeflection() {
+      const { xEdgeProbeDistance, yEdgeProbeDistance, toolProbeMaxDeflection } = this.state;
+      if (!toolProbeMaxDeflection) {
+        return false;
+      }
+      return (
+        Math.abs(xEdgeProbeDistance) > toolProbeMaxDeflection ||
+        Math.abs(yEdgeProbeDistance) > toolProbeMaxDeflection
+      );
+    }
+
     render() {
       const { widgetId } = this.props;
-      const { minimized, isFullscreen } = this.state;
+      const { minimized, isFullscreen, probeType } = this.state;
       const isForkedWidget = widgetId.match(/\w+:[\w\-]+/);
+      const exceedsMaxDeflection = (probeType === 'corner') ? this.exceedsCornerMaxDeflection() : this.exceedsMaxDeflection();
       const state = {
         ...this.state,
-        canClick: this.canClick() && !this.exceedsMaxDeflection(),
+        canClick: this.canClick() && !exceedsMaxDeflection,
         canGetPosition: this.canClick(),
         exceedsMaxDeflection: this.exceedsMaxDeflection(),
+        exceedsCornerMaxDeflection: this.exceedsCornerMaxDeflection(),
       };
       const actions = {
         ...this.actions
@@ -484,10 +665,33 @@ class ProbingCyclesWidget extends PureComponent {
               { [styles.hidden]: minimized }
             )}
           >
-            <EdgeSkewProbe
-              state={state}
-              actions={actions}
-            />
+            <div className="btn-group btn-group-sm" style={{ display: 'flex', marginBottom: 10 }}>
+              {PROBE_TYPES.map(t => (
+                <button
+                  key={t.value}
+                  type="button"
+                  className={
+                    'btn btn-default' + (probeType === t.value ? ' btn-select' : '')
+                  }
+                  style={{ flex: 1 }}
+                  disabled={state.isProbing}
+                  onClick={() => actions.setProbeType(t.value)}
+                >
+                  {t.label}
+                </button>
+              ))}
+            </div>
+            {probeType === 'corner' ? (
+              <CornerProbe
+                state={state}
+                actions={actions}
+              />
+            ) : (
+              <EdgeSkewProbe
+                state={state}
+                actions={actions}
+              />
+            )}
           </Widget.Content>
         </Widget>
       );

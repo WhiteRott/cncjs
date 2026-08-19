@@ -707,5 +707,11 @@
   "Probe: TOUCHING": "Probe: TOUCHING",
   "Probe: clear": "Probe: clear",
   "Zero Probe Widget": "Zero Probe Widget",
-  "Zero Probe": "Zero Probe"
+  "Zero Probe": "Zero Probe",
+  "{{axis}} Edge": "{{axis}} Edge",
+  "Probes two edges (2+ points each) and intersects the fitted lines to find the corner -- doesn't assume a perfect 90°.": "Probes two edges (2+ points each) and intersects the fitted lines to find the corner -- doesn't assume a perfect 90°.",
+  "A Probe Distance exceeds the configured Max Probe Deflection ({{max}}{{units}}). Reduce it or raise the limit in the Tool widget before running.": "A Probe Distance exceeds the configured Max Probe Deflection ({{max}}{{units}}). Reduce it or raise the limit in the Tool widget before running.",
+  "Corner: X{{x}} Y{{y}}": "Corner: X{{x}} Y{{y}}",
+  "Could not compute an intersection -- the two edges may be parallel. Check the direction settings.": "Could not compute an intersection -- the two edges may be parallel. Check the direction settings.",
+  "Edge": "Edge"
 }

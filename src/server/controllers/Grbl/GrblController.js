@@ -198,10 +198,14 @@ class GrblController {
       config: null,
     };
 
-    // Corner Probe - two-edge intersection probe state tracking
+    // Corner Probe - two-edge intersection probe state tracking. Each
+    // point is touched twice (fast find, back off, slow confirm), same
+    // theory as edgeProbeState -- see queueCornerProbePoint.
     cornerProbeState = {
       probedPositions: [],
       probePoints: [],
+      currentTouches: [],
+      pendingAcks: 0,
       // { x, y } intersection of the two probed edges
       result: null,
       config: null,
@@ -689,7 +693,12 @@ class GrblController {
         // regardless of when they were written -- unlike silently
         // stalling the cycle right after a touch with no error reported.
         if (this.isProbeCycleActive()) {
+          // Only one of these is ever actually counting at a time in
+          // practice (a user wouldn't run two probe cycles at once), but
+          // decrementing both unconditionally is harmless -- Math.max
+          // floors whichever one is already at 0.
           this.edgeProbeState.pendingAcks = Math.max(0, this.edgeProbeState.pendingAcks - 1);
+          this.cornerProbeState.pendingAcks = Math.max(0, this.cornerProbeState.pendingAcks - 1);
           this.emit('serialport:read', res.raw);
           this.feeder.next();
           return;
@@ -978,32 +987,83 @@ class GrblController {
               }
             }
 
-            // Corner Probe: two edges, 2+ points each. Fit a line through
+            // Corner Probe: two edges, 2+ points each, each point touched
+            // twice (fast find, back off, slow confirm -- same theory as
+            // edgeprobe above). Once all points are in, fit a line through
             // each edge's contacts (edgeprobe.fitLine), then intersect the
             // two lines -- doesn't assume a perfect 90° corner.
-            if (this.trackProbeResult(this.cornerProbeState, probedPos, 'cornerprobe')) {
-              const tags = this.cornerProbeState.probePoints;
-              const positions = this.cornerProbeState.probedPositions;
+            if (this.cornerProbeState.probePoints.length > 0 && this.cornerProbeState.probedPositions.length < this.cornerProbeState.probePoints.length) {
+              const state = this.cornerProbeState;
+              const pointIndex = state.probedPositions.length;
+              const point = state.probePoints[pointIndex];
 
-              const xPairs = positions
-                .filter((p, i) => tags[i].edge === 'x')
-                .map((p) => [p.y, p.x]); // independent=y, dependent=x
-              const yPairs = positions
-                .filter((p, i) => tags[i].edge === 'y')
-                .map((p) => [p.x, p.y]); // independent=x, dependent=y
+              state.currentTouches = [...state.currentTouches, { ...probedPos }];
+              const touchIndex = state.currentTouches.length;
 
-              const xLine = edgeprobe.fitLine(xPairs);
-              const yLine = edgeprobe.fitLine(yPairs);
-              const result = probecycles.intersectLines(xLine, yLine);
+              log.debug(`[cornerprobe] Point ${pointIndex + 1}/${state.probePoints.length} (${point.edge}-edge) touch ${touchIndex}/2: posX=${probedPos.x.toFixed(3)}, posY=${probedPos.y.toFixed(3)}, posZ=${probedPos.z.toFixed(3)}`);
 
-              this.cornerProbeState.result = result;
-              this.emit('cornerprobe:complete', {
-                positions,
-                xLine,
-                yLine,
-                result,
+              this.emit('cornerprobe:touch', {
+                point: pointIndex,
+                total: state.probePoints.length,
+                touch: touchIndex,
+                touchesPerPoint: 2,
+                pos: { ...probedPos },
               });
-              log.info('[cornerprobe] Probing completed:', result);
+
+              if (touchIndex < 2) {
+                return;
+              }
+
+              const finalTouch = state.currentTouches[1];
+              const compensatedPos = {
+                ...finalTouch,
+                [point.probeAxis]: finalTouch[point.probeAxis] + point.probeCompensation,
+                edge: point.edge,
+              };
+              const newProbedPositions = [...state.probedPositions, compensatedPos];
+              const isCompleted = newProbedPositions.length >= state.probePoints.length;
+
+              state.probedPositions = newProbedPositions;
+              state.currentTouches = [];
+
+              this.emit('cornerprobe:update', {
+                current: newProbedPositions.length,
+                total: state.probePoints.length,
+                probedPos: { ...compensatedPos },
+              });
+
+              if (isCompleted) {
+                const tags = state.probePoints;
+                const positions = newProbedPositions;
+
+                const xPairs = positions
+                  .filter((p, i) => tags[i].edge === 'x')
+                  .map((p) => [p.y, p.x]); // independent=y, dependent=x
+                const yPairs = positions
+                  .filter((p, i) => tags[i].edge === 'y')
+                  .map((p) => [p.x, p.y]); // independent=x, dependent=y
+
+                const xLine = edgeprobe.fitLine(xPairs);
+                const yLine = edgeprobe.fitLine(yPairs);
+                const result = probecycles.intersectLines(xLine, yLine);
+
+                state.result = result;
+                this.emit('cornerprobe:complete', {
+                  positions,
+                  xLine,
+                  yLine,
+                  result,
+                });
+                log.info('[cornerprobe] Probing completed:', result);
+              } else {
+                const nextIndex = newProbedPositions.length;
+                this.emit('cornerprobe:phase', {
+                  point: nextIndex,
+                  total: state.probePoints.length,
+                  phase: 'moving',
+                });
+                this.queueCornerProbePoint(nextIndex);
+              }
             }
 
             // Circle Probe (Bore/Boss): fit a circle through the N contact points
@@ -1057,6 +1117,31 @@ class GrblController {
               lineAxis: null,
               probeAxis: null,
               probeCompensation: 0,
+              currentTouches: [],
+              pendingAcks: 0,
+              result: null,
+              config: null,
+            };
+          } else if (this.cornerProbeState.probePoints.length > 0 && this.cornerProbeState.probedPositions.length < this.cornerProbeState.probePoints.length) {
+            // Same as the edgeprobe failure handling above -- a corner
+            // probe touch that never made contact would otherwise hang
+            // the cycle forever with no feedback.
+            const state = this.cornerProbeState;
+            const pointIndex = state.probedPositions.length;
+            const touchIndex = state.currentTouches.length + 1;
+            const point = state.probePoints[pointIndex];
+
+            log.error(`[cornerprobe] Point ${pointIndex + 1}/${state.probePoints.length} (${point?.edge}-edge) touch ${touchIndex}/2 failed to make contact`);
+
+            this.emit('cornerprobe:failed', {
+              point: pointIndex,
+              total: state.probePoints.length,
+              touch: touchIndex,
+            });
+
+            this.cornerProbeState = {
+              probedPositions: [],
+              probePoints: [],
               currentTouches: [],
               pendingAcks: 0,
               result: null,
@@ -1400,6 +1485,7 @@ class GrblController {
         isPending(this.probeState) ||
         (this.edgeProbeState.pendingAcks > 0) ||
         isPending(this.edgeProbeState) ||
+        (this.cornerProbeState.pendingAcks > 0) ||
         isPending(this.cornerProbeState) ||
         isPending(this.circleProbeState) ||
         isPending(this.rectProbeState)
@@ -1422,15 +1508,24 @@ class GrblController {
         return;
       }
 
-      const { probeAxis, config } = state;
+      const { probeAxis, lineAxis, config } = state;
       const AXIS = probeAxis.toUpperCase();
+      const LINE_AXIS = lineAxis.toUpperCase();
       const target = point[probeAxis] + config.probeDistance;
       const backoff = -Math.sign(config.probeDistance) * config.backoffDistance;
 
       const gcode = [
         `(Edge Probe: point ${index}, touch 1/2 - fast)`,
         'G90',
-        `G0 X${point.x} Y${point.y}`,
+        // Move one axis at a time, not a single diagonal G0 -- moving both
+        // XY at once can cut straight across a corner if this point's line
+        // coordinate and the previous point's probe-axis coordinate don't
+        // happen to line up (e.g. right after switching from one edge to
+        // another in a corner probe). Line axis first (perpendicular to
+        // the probe direction), probe axis last, so the final approach leg
+        // is always a straight move along the direction about to be probed.
+        `G0 ${LINE_AXIS}${point[lineAxis]}`,
+        `G0 ${AXIS}${point[probeAxis]}`,
         `G38.2 ${AXIS}${target} F${config.feedrate}`,
         'G91',
         `G0 ${AXIS}${backoff}`,
@@ -1452,17 +1547,65 @@ class GrblController {
       this.command('gcode', gcode);
     }
 
-    // Shared accumulation step for the corner/circle/rect probe cycles
-    // (same theory as autolevel/edgeprobe above, factored out since these
-    // three cycles have no cycle-specific per-point bookkeeping beyond
-    // "append and check completion" -- only the completion math differs,
-    // which stays in each cycle's own PRB handler branch).
+    // Queues one corner-probe sample point's 2-touch G-code -- same theory
+    // as queueEdgeProbePoint, generalized to a point that already carries
+    // its own probeAxis/target/retractDistance (each edge can run in a
+    // different direction, tagged at cornerprobe:start). backoff reuses
+    // retractDistance's sign (the "away from the surface" direction is
+    // already known from it), scaled down to config.backoffDistance.
+    queueCornerProbePoint(index) {
+      const state = this.cornerProbeState;
+      const point = state.probePoints[index];
+      if (!point) {
+        return;
+      }
+
+      const { config } = state;
+      const { probeAxis } = point;
+      const AXIS = probeAxis.toUpperCase();
+      const lineAxis = (probeAxis === 'x') ? 'y' : 'x';
+      const LINE_AXIS = lineAxis.toUpperCase();
+      const backoff = Math.sign(point.retractDistance) * config.backoffDistance;
+
+      const gcode = [
+        `(Corner Probe: ${point.edge}-edge, point ${index}, touch 1/2 - fast)`,
+        'G90',
+        // Move one axis at a time, not a single diagonal G0 -- this
+        // matters most when switching from the X-edge to the Y-edge (or
+        // vice versa), where the two points can be far apart in both
+        // axes and a diagonal move could cut straight across the corner.
+        // Line axis first, probe axis last, so the final approach leg is
+        // always a straight move along the direction about to be probed.
+        `G0 ${LINE_AXIS}${point[lineAxis]}`,
+        `G0 ${AXIS}${point[probeAxis]}`,
+        `G38.2 ${AXIS}${point.target} F${config.feedrate}`,
+        'G91',
+        `G0 ${AXIS}${backoff}`,
+        'G90',
+        `G4 P${config.settleDelay}`,
+        `(Corner Probe: ${point.edge}-edge, point ${index}, touch 2/2 - slow)`,
+        `G38.2 ${AXIS}${point.target} F${config.slowFeedrate}`,
+        'G91',
+        `G0 ${AXIS}${point.retractDistance}`,
+        'G90',
+      ];
+
+      const realLineCount = gcode.filter((line) => !line.trim().startsWith('(')).length;
+      state.pendingAcks += realLineCount;
+
+      this.command('gcode', gcode);
+    }
+
+    // Shared accumulation step for the circle/rect probe cycles (same
+    // theory as autolevel/edgeprobe above, factored out since these two
+    // cycles have no cycle-specific per-point bookkeeping beyond "append
+    // and check completion" -- only the completion math differs, which
+    // stays in each cycle's own PRB handler branch).
     //
     // If the point about to be recorded carries its own probeAxis +
-    // probeCompensation (ball-tip stylus radius correction, see
-    // cornerprobe:start), it's applied here before the position is stored
-    // -- points without it (circle/rect, not yet implemented) pass through
-    // unchanged.
+    // probeCompensation (ball-tip stylus radius correction), it's applied
+    // here before the position is stored -- points without it (circle/rect,
+    // not yet implemented) pass through unchanged.
     // @return {boolean} true once this was the cycle's final point
     trackProbeResult(state, probedPos, eventName) {
       if (!(state.probePoints.length > 0 && state.probedPositions.length < state.probePoints.length)) {
@@ -2347,6 +2490,9 @@ class GrblController {
             xEdge, // { start: {x,y}, end: {x,y}, pointCount, probeDistance, retractDistance }
             yEdge, // { start: {x,y}, end: {x,y}, pointCount, probeDistance, retractDistance }
             feedrate,
+            slowFeedrate,
+            backoffDistance,
+            settleDelay = 0.3,
             probeRadius = 0,
           } = params;
 
@@ -2383,34 +2529,24 @@ class GrblController {
           this.cornerProbeState = {
             probedPositions: [],
             probePoints: points,
+            currentTouches: [],
+            pendingAcks: 0,
             result: null,
-            config: { ...params },
+            config: { ...params, feedrate, slowFeedrate, backoffDistance, settleDelay },
           };
 
-          log.info(`[cornerprobe:start] Start probing ${xPoints.length} X-edge points then ${yPoints.length} Y-edge points`);
+          log.info(`[cornerprobe:start] Start probing ${xPoints.length} X-edge points then ${yPoints.length} Y-edge points (fast=${feedrate}, slow=${slowFeedrate}, backoff=${backoffDistance}, settle=${settleDelay})`);
 
-          // Same theory as edgeprobe: probe toward an absolute target
-          // (sample point's coordinate + signed search distance), retract
-          // by a fixed amount, stay in G90 throughout.
-          const probeGCodes = [];
-          points.forEach((point, index) => {
-            const AXIS = point.probeAxis.toUpperCase();
-            probeGCodes.push(`(Corner Probe: ${point.edge}-edge, point ${index})`);
-            probeGCodes.push('G90');
-            probeGCodes.push(`G0 X${point.x} Y${point.y}`);
-            probeGCodes.push(`G38.2 ${AXIS}${point.target} F${feedrate}`);
-            probeGCodes.push('G91');
-            probeGCodes.push(`G0 ${AXIS}${point.retractDistance}`);
-            probeGCodes.push('G90');
-          });
-
-          this.command('gcode', probeGCodes);
+          this.emit('cornerprobe:phase', { point: 0, total: points.length, phase: 'moving' });
+          this.queueCornerProbePoint(0);
         },
         'cornerprobe:stop': () => {
           this.command('reset');
           this.cornerProbeState = {
             probedPositions: [],
             probePoints: [],
+            currentTouches: [],
+            pendingAcks: 0,
             result: null,
             config: null,
           };
