@@ -35,13 +35,14 @@ class ToolLibrary extends PureComponent {
                   <th>{i18n._('#')}</th>
                   <th>{i18n._('Name')}</th>
                   <th>{i18n._('Diameter')}</th>
+                  <th>{i18n._('Z Offset')}</th>
                   <th style={{ width: '1%' }} />
                 </tr>
               </thead>
               <tbody>
                 {tools.length === 0 && (
                   <tr>
-                    <td colSpan="5">
+                    <td colSpan="6">
                       <div className={styles.emptyResult}>
                         {i18n._('No tools')}
                       </div>
@@ -70,6 +71,9 @@ class ToolLibrary extends PureComponent {
                     <td>{tool.number}</td>
                     <td>{tool.name}</td>
                     <td>{tool.diameter}</td>
+                    <td title={tool.zOffsetTime ? new Date(tool.zOffsetTime).toLocaleString() : i18n._('Not yet calibrated')}>
+                      {tool.zOffsetTime ? Number(tool.zOffset).toFixed(3) : '–'}
+                    </td>
                     <td style={{ width: '1%' }}>
                       <div className="nowrap">
                         <Button

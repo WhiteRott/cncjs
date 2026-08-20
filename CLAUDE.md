@@ -89,18 +89,43 @@ describes the probe-length piece; needs a rewrite before marking ready for revie
    selection, one record flagged at a time).
 2. **Tool length offsets** — hook into GRBL/grblHAL's tool length offset workflow (relevant
    G-codes: G43.1, G49), store a per-tool Z offset, apply it on tool change.
-   **Partially done, unchanged since last update — this is the piece still open.** Added a
-   `toolProbeLength` field (global, alongside the pre-existing `touchPlateHeight`)
-   representing the touch probe's stylus/stickout length below the tool tip — confirmed via
-   user's hardware that it ADDS to `touchPlateHeight` in the offset math. Wired into
-   `src/server/api/api.tool.js` (allow-list), `src/server/controllers/Grbl/GrblController.js`
-   (WCS/TLO offset math), and the Tool widget (`src/app/widgets/Tool/index.jsx` + `Tool.jsx`,
-   UI field + G-code preview for all 4 controller branches). Marlin/Smoothie/TinyG
-   *controllers* were deliberately left untouched (only their UI preview text was updated) —
-   this machine only runs Grbl/grblHAL. **Still needed**: the actual per-tool Z offset — this
-   only added probe-length compensation to the existing single global tool-change config.
-   The tool library (item 1) now exists, so the blocker for per-tool offsets is gone; this is
-   the natural next slice of work. Not yet dry-run tested on real hardware.
+   **Done, on branch `feature/per-tool-z-offsets` (built off `feature/tool-library`, not yet
+   merged back).** Global probe-length compensation (`toolProbeLength`, described below)
+   already worked; this adds actual per-tool persistence on top of it. Design choice: the
+   TLO tool-change routine still probes on *every* tool change exactly as before (no change
+   to physical motion) — it now additionally records the freshly-computed offset into that
+   tool's `ToolLibrary` record, so the library becomes a running calibration log rather than
+   the offset being thrown away each time. (The alternative — skip probing when a stored
+   offset already exists, for faster tool changes — was considered and explicitly rejected
+   for now: trusting a stale stored number for real Z motion without re-verification was
+   judged too risky before any of this has run on real hardware.)
+   - `src/server/lib/toolLibrary.js` (new): shared module extracted from
+     `api.toolLibrary.js` (`toRecordFields`, `getSanitizedRecords`, plus new
+     `updateToolZOffsetByNumber(toolNumber, zOffsetMm)`). `api.toolLibrary.js` now imports
+     from it instead of duplicating the record schema. Added `zOffset` (mm) and
+     `zOffsetTime` (epoch ms, 0 = never calibrated) to the tool record shape.
+   - `GrblController.js`'s `tool:change` handler: captures `this.runner.getTool()` (the
+     T-word the running program requested) once at the top, and adds a `storeToolZOffset`
+     context function (same pattern as the existing `mapWCSToPValue`) that converts the
+     computed offset to mm and persists it via `updateToolZOffsetByNumber`, then returns the
+     value unchanged. Wired into the TLO branch's G43.1 line only —
+     `G43.1 Z[storeToolZOffset(posz - touch_plate_height - tool_probe_length)]`. The WCS
+     branch was deliberately left alone: it re-zeros the work coordinate system rather than
+     computing a tool-length delta, so there's no meaningful "tool offset" number to store
+     there (the value it writes is a constant, independent of which tool is loaded).
+     Matching is by tool number against the library, not the UI's manually-toggled "active"
+     flag, so a write always lands on the tool the machine actually just probed for even if
+     "active" is stale.
+   - `ToolLibrary.jsx` widget: added a read-only "Z Offset" column (3 decimals, tooltip shows
+     the calibration timestamp, dash when `zOffsetTime` is 0/never calibrated). i18n
+     scaffolding added for "Z Offset" / "Not yet calibrated" across all 17 locale files.
+   - Unit tested (`src/server/lib/__tests__/toolLibrary.test.js`) and full suite (241 tests,
+     12 suites) verified green. Browser-verified against the real dev server and the user's
+     actual `~/.cncrc` tool library data (7 real tools) — column renders correctly, no
+     console errors; a test record added during verification was deleted afterward so the
+     user's real data wasn't left polluted.
+   - **Not yet dry-run tested on real hardware** — same caveat as the underlying probe-length
+     math it builds on.
 3. **Probing cycles** — extend probing beyond simple Z-touch-off. **Substantially done.**
    Built as a new `ProbingCycles` widget (`src/app/widgets/ProbingCycles/`) rather than
    extending Autolevel — Autolevel stayed a separate grid/height-mapping tool since the new

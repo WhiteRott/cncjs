@@ -1,64 +1,14 @@
 import find from 'lodash/find';
-import castArray from 'lodash/castArray';
-import isPlainObject from 'lodash/isPlainObject';
 import uuid from 'uuid';
 import settings from '../config/settings';
-import logger from '../lib/logger';
 import config from '../services/configstore';
 import { getPagingRange } from './paging';
+import { CONFIG_KEY, toRecordFields, getSanitizedRecords } from '../lib/toolLibrary';
 import {
   ERR_BAD_REQUEST,
   ERR_NOT_FOUND,
   ERR_INTERNAL_SERVER_ERROR
 } from '../constants';
-
-const log = logger('api:toolLibrary');
-const CONFIG_KEY = 'toolLibrary';
-
-const toRecordFields = (record) => {
-  const {
-    id,
-    mtime,
-    number = 0,
-    name = '',
-    type = '',
-    diameter = 0,
-    fluteLength = 0,
-    length = 0,
-    flutes = 0,
-    notes = '',
-    active = false
-  } = { ...record };
-
-  return { id, mtime, number, name, type, diameter, fluteLength, length, flutes, notes, active };
-};
-
-const getSanitizedRecords = () => {
-  const records = castArray(config.get(CONFIG_KEY, []));
-
-  let shouldUpdate = false;
-  for (let i = 0; i < records.length; ++i) {
-    if (!isPlainObject(records[i])) {
-      records[i] = {};
-    }
-
-    const record = records[i];
-
-    if (!record.id) {
-      record.id = uuid.v4();
-      shouldUpdate = true;
-    }
-  }
-
-  if (shouldUpdate) {
-    log.debug(`update sanitized records: ${JSON.stringify(records)}`);
-
-    // Pass `{ silent changes }` will suppress the change event
-    config.set(CONFIG_KEY, records, { silent: true });
-  }
-
-  return records;
-};
 
 export const fetch = (req, res) => {
   const records = getSanitizedRecords();

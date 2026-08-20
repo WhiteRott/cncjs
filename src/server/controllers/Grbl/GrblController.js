@@ -10,6 +10,7 @@ import _ from 'lodash';
 import * as autolevel from '../../lib/autolevel';
 import * as edgeprobe from '../../lib/edgeprobe';
 import * as probecycles from '../../lib/probecycles';
+import { updateToolZOffsetByNumber } from '../../lib/toolLibrary';
 import EventTrigger from '../../lib/EventTrigger';
 import Feeder from '../../lib/Feeder';
 import MessageSlot from '../../lib/MessageSlot';
@@ -2331,6 +2332,7 @@ class GrblController {
             'G20': IMPERIAL_UNITS,
             'G21': METRIC_UNITS,
           }[modal.units];
+          const tool = this.runner.getTool();
           const toolChangePolicy = config.get('tool.toolChangePolicy', TOOL_CHANGE_POLICY_IGNORE_M6_COMMANDS);
           const toolChangeX = mapPositionToUnits(config.get('tool.toolChangeX', 0), units);
           const toolChangeY = mapPositionToUnits(config.get('tool.toolChangeY', 0), units);
@@ -2368,6 +2370,16 @@ class GrblController {
                 'G58': 5,
                 'G59': 6,
               }[wcs] || 0;
+            },
+            // Persists the freshly-measured TLO value against the tool
+            // library record for the T-word requested by this tool change,
+            // so it's still there to look at once the next tool is loaded.
+            // Returns the value unchanged -- this is a side effect riding
+            // along on the G43.1 line's own math, not a substitute for it.
+            'storeToolZOffset': function (value) {
+              const zOffsetMm = (units === IMPERIAL_UNITS) ? in2mm(value) : value;
+              updateToolZOffsetByNumber(tool, zOffsetMm);
+              return value;
             },
           };
 
@@ -2412,8 +2424,9 @@ class GrblController {
             lines.push('G91 [tool_probe_command] F[tool_probe_feedrate] Z[tool_probe_z - mposz - tool_probe_distance]');
             // Pause for 1 second
             lines.push('%wait 1');
-            // Set tool length offset
-            lines.push('G43.1 Z[posz - touch_plate_height - tool_probe_length]');
+            // Set tool length offset, and record it against this tool
+            // number in the tool library for later reference
+            lines.push('G43.1 Z[storeToolZOffset(posz - touch_plate_height - tool_probe_length)]');
           } else if (toolChangePolicy === TOOL_CHANGE_POLICY_MANUAL_TOOL_CHANGE_CUSTOM_PROBING) {
             lines.push(...toolProbeCustomCommands);
           }
