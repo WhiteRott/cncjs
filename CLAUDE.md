@@ -77,44 +77,82 @@
 
 ## Current task: three feature additions to this fork
 Work happens on branch `feature/tool-library`, PR tracked at
-`https://github.com/WhiteRott/cncjs/pull/1` (draft).
+`https://github.com/WhiteRott/cncjs/pull/1` (draft — description is stale, still only
+describes the probe-length piece; needs a rewrite before marking ready for review).
 
-1. **Tool library** — a data model + UI for managing a table of tools (number, diameter,
-   length, notes, etc.). This is foundational — the other two features build on it.
-   **Not started yet.**
+1. **Tool library** — a data model + UI for managing a table of tools. **Done.**
+   `src/server/api/api.toolLibrary.js` (CRUD + paging, `configstore` key `'toolLibrary'`),
+   client wrapper in `app/api`, and the `ToolLibrary` widget
+   (`src/app/widgets/ToolLibrary/{index,ToolLibrary,AddTool,EditTool,constants}.jsx`).
+   Record fields: `id`, `mtime`, `number`, `name`, `type` (shape taxonomy — see below),
+   `diameter`, `fluteLength`, `length`, `flutes`, `notes`, `active` (single active-tool
+   selection, one record flagged at a time).
 2. **Tool length offsets** — hook into GRBL/grblHAL's tool length offset workflow (relevant
    G-codes: G43.1, G49), store a per-tool Z offset, apply it on tool change.
-   **Partially done**: added a `toolProbeLength` field (global, alongside the pre-existing
-   `touchPlateHeight`) representing the touch probe's stylus/stickout length below the tool
-   tip — confirmed via user's hardware that it ADDS to `touchPlateHeight` in the offset math.
-   Wired into `src/server/api/api.tool.js` (allow-list), `src/server/controllers/Grbl/GrblController.js`
+   **Partially done, unchanged since last update — this is the piece still open.** Added a
+   `toolProbeLength` field (global, alongside the pre-existing `touchPlateHeight`)
+   representing the touch probe's stylus/stickout length below the tool tip — confirmed via
+   user's hardware that it ADDS to `touchPlateHeight` in the offset math. Wired into
+   `src/server/api/api.tool.js` (allow-list), `src/server/controllers/Grbl/GrblController.js`
    (WCS/TLO offset math), and the Tool widget (`src/app/widgets/Tool/index.jsx` + `Tool.jsx`,
    UI field + G-code preview for all 4 controller branches). Marlin/Smoothie/TinyG
    *controllers* were deliberately left untouched (only their UI preview text was updated) —
-   this machine only runs Grbl/grblHAL. **Still needed**: the actual per-tool Z offset (this
-   only added probe-length compensation to the existing single global tool-change config —
-   true per-tool offsets depend on the tool library from item 1 existing first). Not yet
-   dry-run tested on real hardware.
-3. **Probing cycles** — extend probing beyond simple Z-touch-off. **Not started yet.**
-   Existing code reviewed in depth (see below) — extend Autolevel's backend rather than
-   building parallel infrastructure.
+   this machine only runs Grbl/grblHAL. **Still needed**: the actual per-tool Z offset — this
+   only added probe-length compensation to the existing single global tool-change config.
+   The tool library (item 1) now exists, so the blocker for per-tool offsets is gone; this is
+   the natural next slice of work. Not yet dry-run tested on real hardware.
+3. **Probing cycles** — extend probing beyond simple Z-touch-off. **Substantially done.**
+   Built as a new `ProbingCycles` widget (`src/app/widgets/ProbingCycles/`) rather than
+   extending Autolevel — Autolevel stayed a separate grid/height-mapping tool since the new
+   cycles are single-shot geometry probes (edge/corner), not surface compensation. Backend
+   math lives in `src/server/lib/edgeprobe.js` (line fit for edge/skew) and
+   `src/server/lib/probecycles.js` (circle fit for corner/bore/boss, shared by future cycles).
+   Existing `Probe` widget was renamed to **Zero Probe** (`src/app/widgets/Probe/`) to
+   disambiguate from Probing Cycles — it's still the simple single-axis G38.2–G38.5 touch-off,
+   unchanged in behavior.
+   - **Edge / Skew Probe**: probes N points along an edge, least-squares line fit reports
+     skew angle. Reworked into a 2-touch cycle (fast find, back off, settle, slow confirm
+     touch feeds the fit) for repeatability.
+   - **Corner Probe**: probes both edges of a corner using the same 2-touch technique;
+     approach moves always go one axis at a time (line axis, then probe axis) so the final
+     approach leg is a straight line and can't cut diagonally across the corner.
+   - **Probe tip diameter compensation**: ball-tip stylus contact points are at the ball
+     center, not the true surface — each point is corrected by stylus radius along its probe
+     axis before fitting.
+   - **Safety limits**: global "Max Probe Deflection" setting (alongside Probe Length) —
+     Probing Cycles warns/blocks a run whose configured Probe Distance would exceed it.
+   - **Retry-on-miss**: a G38.2 that reaches its target without triggering hard-alarms
+     grblHAL. Failed touches now retry the whole point (unlock, requeue, feeder queue
+     explicitly cleared first) at increasing search distance (+1mm, +2mm... up to +5mm total)
+     before giving up and leaving it alarmed as before.
+   - **Z-lift on edge transitions**: the move from the last X-edge point to the first Y-edge
+     point now lifts Z first, since that's the one point-to-point travel that crosses real
+     stock rather than open air.
+   - Underlying bug fixed along the way: cncjs's periodic `$G` parser-state poll writes to
+     the serial port on its own timer, independent of the feeder's send/wait-for-ok
+     sequencing — an in-flight `$G` query's reply could land mid-cycle and get consumed by
+     flag-matching instead of content, swallowing the probe's own `ok` and stalling the feed
+     queue. Fixed via pendingAcks-based `ok` priority handling.
 
-### Widget review findings (Probe / Autolevel / Tool)
-- `src/app/widgets/Probe/` — simple manual single-axis touch-off (G38.2–G38.5), builds
-  either a TLO (`G43.1`) or WCS (`G10 L20`) sequence client-side, no server persistence of
-  results. Local component state only.
+### Widget map (Probe / Zero Probe / ProbingCycles / Autolevel / Tool / ToolLibrary)
+- `src/app/widgets/Probe/` (**Zero Probe**) — simple manual single-axis touch-off
+  (G38.2–G38.5), builds either a TLO (`G43.1`) or WCS (`G10 L20`) sequence client-side, no
+  server persistence of results. Local component state only.
+- `src/app/widgets/ProbingCycles/` — Edge/Skew and Corner probe cycles, see item 3 above.
 - `src/app/widgets/Autolevel/` — a full grid-based height-mapping/surface-compensation
   wizard (probe area → grid probe → bilinear-interpolated Z-compensation applied to loaded
   G-code). Real engine at `src/server/lib/autolevel.js` + per-controller probe-result capture
-  in each `*Controller.js`. This substantially overlaps with planned "probing cycles" (item
-  3) — extend this rather than duplicate it.
-- `src/app/widgets/Tool/` — **not a tool library**. A single global tool-change policy panel
-  (one machine-wide config, not a table of tools): 5 policy modes (ignore M6 / send M6 / WCS
-  offset / TLO offset / custom macro), server-persisted at `GET/POST /api/tool` →
+  in each `*Controller.js`. Left as-is — kept separate from Probing Cycles (see item 3).
+- `src/app/widgets/Tool/` — **not the tool library** (that's `ToolLibrary`, item 1). A single
+  global tool-change policy panel (one machine-wide config): 5 policy modes (ignore M6 / send
+  M6 / WCS offset / TLO offset / custom macro), server-persisted at `GET/POST /api/tool` →
   `configstore` key `'tool'`. Actual M6 interception + macro execution lives in
   `GrblController.js`'s `tool:change` handler (~line 1656), using cncjs's bracket-macro
-  engine (`[tool_probe_z]` etc.), not raw string concatenation. Good foundation to extend for
-  per-tool offsets once the tool library exists; has zero multi-tool data model today.
+  engine (`[tool_probe_z]` etc.), not raw string concatenation. This is what item 2's
+  per-tool offset work will extend, now that `ToolLibrary` supplies the multi-tool data model
+  it was missing.
+- `src/app/widgets/ToolLibrary/` — the tool library (item 1): table UI + add/edit modals over
+  `api.toolLibrary`.
 
 ### grblHAL capability notes (from `~/cncjs-docker/backups/himill-grbl-settings-<date>.txt`)
 - `$6=0` — probe pin present, functional, not inverted.
