@@ -713,5 +713,8 @@
   "A Probe Distance exceeds the configured Max Probe Deflection ({{max}}{{units}}). Reduce it or raise the limit in the Tool widget before running.": "A Probe Distance exceeds the configured Max Probe Deflection ({{max}}{{units}}). Reduce it or raise the limit in the Tool widget before running.",
   "Corner: X{{x}} Y{{y}}": "Corner: X{{x}} Y{{y}}",
   "Could not compute an intersection -- the two edges may be parallel. Check the direction settings.": "Could not compute an intersection -- the two edges may be parallel. Check the direction settings.",
-  "Edge": "Edge"
+  "Edge": "Edge",
+  "Point {{current}} of {{total}}: touch missed, retrying (attempt {{attempt}}, search +{{extension}}{{units}})...": "Point {{current}} of {{total}}: touch missed, retrying (attempt {{attempt}}, search +{{extension}}{{units}})...",
+  "Z Lift": "Z Lift",
+  "How far to retract in Z before crossing from the X-edge to the Y-edge, and how far to plunge back down before probing resumes. This is the only point-to-point move that travels a real, unpredictable distance across your part — set it tall enough to clear the stock. Leave at 0 to disable (not recommended unless you've verified the path is clear).": "How far to retract in Z before crossing from the X-edge to the Y-edge, and how far to plunge back down before probing resumes. This is the only point-to-point move that travels a real, unpredictable distance across your part — set it tall enough to clear the stock. Leave at 0 to disable (not recommended unless you've verified the path is clear)."
 }

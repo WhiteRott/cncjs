@@ -190,6 +190,14 @@ class GrblController {
       // the points-remaining comparison can't see.
       pendingAcks: 0,
 
+      // How many times the current point has been retried after a touch
+      // failed to make contact, and how far the search distance has been
+      // extended (mm) for the current retry -- both reset to 0 whenever a
+      // point finalizes and the cycle moves on. See the PRB failure
+      // handler and queueEdgeProbePoint.
+      retryAttempt: 0,
+      retryExtension: 0,
+
       // The line fit computed once all points are probed:
       // { slope, intercept, angleRad, angleDeg }
       result: null,
@@ -206,6 +214,8 @@ class GrblController {
       probePoints: [],
       currentTouches: [],
       pendingAcks: 0,
+      retryAttempt: 0,
+      retryExtension: 0,
       // { x, y } intersection of the two probed edges
       result: null,
       config: null,
@@ -957,6 +967,10 @@ class GrblController {
 
               state.probedPositions = newProbedPositions;
               state.currentTouches = [];
+              // This point is done -- the next point (if any) starts with
+              // a clean retry budget.
+              state.retryAttempt = 0;
+              state.retryExtension = 0;
 
               this.emit('edgeprobe:update', {
                 current: newProbedPositions.length,
@@ -976,6 +990,19 @@ class GrblController {
                   fit,
                 });
                 log.info('[edgeprobe] Probing completed:', fit);
+
+                // Deliberately NOT resetting edgeProbeState here (tried
+                // that, reverted it): the trailing retract for this final
+                // point is still queued behind the line that just reported
+                // PRB, and isProbeCycleActive() staying true via pendingAcks
+                // is exactly what protects its 'ok's from a stray $G reply
+                // stealing one and stalling the retract mid-flight -- see
+                // isProbeCycleActive()'s own comment. Clearing state early
+                // reopens precisely the race that was fixed earlier tonight,
+                // just at the tail end instead of mid-cycle. probePoints/
+                // probedPositions staying populated after completion is
+                // harmless: edgeprobe:start fully replaces this object on
+                // the next run regardless.
               } else {
                 const nextIndex = newProbedPositions.length;
                 this.emit('edgeprobe:phase', {
@@ -1025,6 +1052,10 @@ class GrblController {
 
               state.probedPositions = newProbedPositions;
               state.currentTouches = [];
+              // This point is done -- the next point (if any) starts with
+              // a clean retry budget.
+              state.retryAttempt = 0;
+              state.retryExtension = 0;
 
               this.emit('cornerprobe:update', {
                 current: newProbedPositions.length,
@@ -1055,6 +1086,12 @@ class GrblController {
                   result,
                 });
                 log.info('[cornerprobe] Probing completed:', result);
+
+                // Deliberately NOT resetting cornerProbeState here -- see
+                // the matching comment in the edgeprobe completion branch
+                // above. The trailing retract for this final point is
+                // still queued and needs isProbeCycleActive() (via
+                // pendingAcks) to stay true a little longer to protect it.
               } else {
                 const nextIndex = newProbedPositions.length;
                 this.emit('cornerprobe:phase', {
@@ -1103,25 +1140,28 @@ class GrblController {
             const pointIndex = state.probedPositions.length;
             const touchIndex = state.currentTouches.length + 1;
 
-            log.error(`[edgeprobe] Point ${pointIndex + 1}/${state.probePoints.length} touch ${touchIndex}/2 failed to make contact`);
-
-            this.emit('edgeprobe:failed', {
-              point: pointIndex,
-              total: state.probePoints.length,
-              touch: touchIndex,
-            });
-
-            this.edgeProbeState = {
-              probedPositions: [],
-              probePoints: [],
-              lineAxis: null,
-              probeAxis: null,
-              probeCompensation: 0,
-              currentTouches: [],
-              pendingAcks: 0,
-              result: null,
-              config: null,
-            };
+            const retried = this.retryOrFailProbeTouch(
+              state,
+              'edgeprobe',
+              pointIndex,
+              touchIndex,
+              (idx) => this.queueEdgeProbePoint(idx)
+            );
+            if (!retried) {
+              this.edgeProbeState = {
+                probedPositions: [],
+                probePoints: [],
+                lineAxis: null,
+                probeAxis: null,
+                probeCompensation: 0,
+                currentTouches: [],
+                pendingAcks: 0,
+                retryAttempt: 0,
+                retryExtension: 0,
+                result: null,
+                config: null,
+              };
+            }
           } else if (this.cornerProbeState.probePoints.length > 0 && this.cornerProbeState.probedPositions.length < this.cornerProbeState.probePoints.length) {
             // Same as the edgeprobe failure handling above -- a corner
             // probe touch that never made contact would otherwise hang
@@ -1129,24 +1169,26 @@ class GrblController {
             const state = this.cornerProbeState;
             const pointIndex = state.probedPositions.length;
             const touchIndex = state.currentTouches.length + 1;
-            const point = state.probePoints[pointIndex];
 
-            log.error(`[cornerprobe] Point ${pointIndex + 1}/${state.probePoints.length} (${point?.edge}-edge) touch ${touchIndex}/2 failed to make contact`);
-
-            this.emit('cornerprobe:failed', {
-              point: pointIndex,
-              total: state.probePoints.length,
-              touch: touchIndex,
-            });
-
-            this.cornerProbeState = {
-              probedPositions: [],
-              probePoints: [],
-              currentTouches: [],
-              pendingAcks: 0,
-              result: null,
-              config: null,
-            };
+            const retried = this.retryOrFailProbeTouch(
+              state,
+              'cornerprobe',
+              pointIndex,
+              touchIndex,
+              (idx) => this.queueCornerProbePoint(idx)
+            );
+            if (!retried) {
+              this.cornerProbeState = {
+                probedPositions: [],
+                probePoints: [],
+                currentTouches: [],
+                pendingAcks: 0,
+                retryAttempt: 0,
+                retryExtension: 0,
+                result: null,
+                config: null,
+              };
+            }
           }
         }
       });
@@ -1492,6 +1534,76 @@ class GrblController {
       );
     }
 
+    // Shared retry-then-give-up policy for a probe touch that failed to
+    // make contact (G38.2 reached its target with no trigger). Retries
+    // the whole point from scratch (both touches) with the search
+    // distance extended a little further each attempt -- same distance
+    // first (covers a touch that simply missed, e.g. too slow a feed to
+    // reliably trigger a spring-loaded stylus), then +1mm, +2mm, ... up to
+    // MAX_SEARCH_EXTENSION_MM total, then gives up and leaves the machine
+    // alarmed for the operator to inspect, same as before this existed.
+    //
+    // G38.2 failing raises a hard alarm in grblHAL (ALARM:5) that blocks
+    // all further motion until unlocked -- the feeder itself refuses to
+    // send while alarmed and resets its own queue if it tries. So a retry
+    // means: unlock ($X), wait a beat for grblHAL to actually leave the
+    // alarm state, then requeue the point. Real tradeoff: the machine
+    // moves again on its own after every failed touch, without the
+    // operator inspecting it first -- that's the behavior explicitly
+    // asked for here, in exchange for not needing a manual unlock every
+    // time a touch is merely unreliable rather than genuinely missing.
+    //
+    // @return {boolean} true if a retry was queued (caller should leave
+    //   state as-is); false if retries are exhausted (caller should reset)
+    retryOrFailProbeTouch(state, cycleName, pointIndex, touchIndex, queuePoint) {
+      const MAX_SEARCH_EXTENSION_MM = 5;
+      const UNLOCK_SETTLE_MS = 300;
+
+      const nextAttempt = state.retryAttempt + 1;
+      const extension = Math.max(0, nextAttempt - 1);
+
+      if (extension > MAX_SEARCH_EXTENSION_MM) {
+        log.error(`[${cycleName}] Point ${pointIndex + 1} touch ${touchIndex}/2 failed after exhausting retries (searched up to +${MAX_SEARCH_EXTENSION_MM}mm)`);
+        this.emit(`${cycleName}:failed`, {
+          point: pointIndex,
+          total: state.probePoints.length,
+          touch: touchIndex,
+        });
+        return false;
+      }
+
+      log.info(`[${cycleName}] Point ${pointIndex + 1} touch ${touchIndex}/2 missed contact -- retrying (attempt ${nextAttempt}, search +${extension}mm)`);
+      state.retryAttempt = nextAttempt;
+      state.retryExtension = extension;
+      state.currentTouches = [];
+      state.pendingAcks = 0;
+
+      // The failed point's G-code was queued as one batch; whatever came
+      // after the line that failed (backoff, settle, the other touch,
+      // final retract) is still sitting in the feeder's queue, unsent.
+      // Left alone, it would only get flushed lazily the next time the
+      // feeder tries to send while still alarmed -- a timing gap that
+      // could let stale motion from the OLD point leak out once $X
+      // clears the alarm, before the fresh requeue below is in flight.
+      // Clear it explicitly so there's nothing left to leak.
+      this.feeder.reset();
+
+      this.emit(`${cycleName}:retry`, {
+        point: pointIndex,
+        total: state.probePoints.length,
+        touch: touchIndex,
+        attempt: nextAttempt,
+        extension,
+      });
+
+      this.writeln('$X');
+      setTimeout(() => {
+        queuePoint(pointIndex);
+      }, UNLOCK_SETTLE_MS);
+
+      return true;
+    }
+
     // Queues one edge-probe sample point's 2-touch G-code: rapid to the
     // approach position, fast touch toward the target, back off, then a
     // slow touch to the same target for an accurate/repeatable reading,
@@ -1511,7 +1623,11 @@ class GrblController {
       const { probeAxis, lineAxis, config } = state;
       const AXIS = probeAxis.toUpperCase();
       const LINE_AXIS = lineAxis.toUpperCase();
-      const target = point[probeAxis] + config.probeDistance;
+      // retryExtension (0 unless a prior touch on this point missed) pushes
+      // the search further in the same direction as probeDistance -- see
+      // retryOrFailProbeTouch.
+      const probeDistance = config.probeDistance + (Math.sign(config.probeDistance) * state.retryExtension);
+      const target = point[probeAxis] + probeDistance;
       const backoff = -Math.sign(config.probeDistance) * config.backoffDistance;
 
       const gcode = [
@@ -1566,25 +1682,49 @@ class GrblController {
       const lineAxis = (probeAxis === 'x') ? 'y' : 'x';
       const LINE_AXIS = lineAxis.toUpperCase();
       const backoff = Math.sign(point.retractDistance) * config.backoffDistance;
+      // retryExtension (0 unless a prior touch on this point missed) pushes
+      // the search further in the same direction as the original probe --
+      // see retryOrFailProbeTouch. point.target already has the base probe
+      // travel baked in, so recover its direction from target vs approach.
+      const probeDirSign = Math.sign(point.target - point[probeAxis]);
+      const target = point.target + (probeDirSign * state.retryExtension);
+
+      // Within an edge, consecutive points share an approach axis close
+      // enough that moving one axis at a time (line axis first, probe axis
+      // last, so the final leg is always a straight move along the probed
+      // direction) is safe without lifting -- it just avoids a diagonal
+      // cut. But the ONE move that crosses from one edge's territory into
+      // the other's (this point's liftBeforeApproach) has no such
+      // guarantee: a same-Z move, single-axis or not, has no idea whether
+      // that path is actually clear of the stock. That transition instead
+      // retracts to a safe Z, travels there (diagonal is fine now, since
+      // it's lifted clear), then plunges back down before probing.
+      const approachGCode = (point.liftBeforeApproach && config.zLift > 0)
+        ? [
+          'G91',
+          `G0 Z${config.zLift}`,
+          'G90',
+          `G0 X${point.x} Y${point.y}`,
+          'G91',
+          `G0 Z${-config.zLift}`,
+          'G90',
+        ]
+        : [
+          `G0 ${LINE_AXIS}${point[lineAxis]}`,
+          `G0 ${AXIS}${point[probeAxis]}`,
+        ];
 
       const gcode = [
         `(Corner Probe: ${point.edge}-edge, point ${index}, touch 1/2 - fast)`,
         'G90',
-        // Move one axis at a time, not a single diagonal G0 -- this
-        // matters most when switching from the X-edge to the Y-edge (or
-        // vice versa), where the two points can be far apart in both
-        // axes and a diagonal move could cut straight across the corner.
-        // Line axis first, probe axis last, so the final approach leg is
-        // always a straight move along the direction about to be probed.
-        `G0 ${LINE_AXIS}${point[lineAxis]}`,
-        `G0 ${AXIS}${point[probeAxis]}`,
-        `G38.2 ${AXIS}${point.target} F${config.feedrate}`,
+        ...approachGCode,
+        `G38.2 ${AXIS}${target} F${config.feedrate}`,
         'G91',
         `G0 ${AXIS}${backoff}`,
         'G90',
         `G4 P${config.settleDelay}`,
         `(Corner Probe: ${point.edge}-edge, point ${index}, touch 2/2 - slow)`,
-        `G38.2 ${AXIS}${point.target} F${config.slowFeedrate}`,
+        `G38.2 ${AXIS}${target} F${config.slowFeedrate}`,
         'G91',
         `G0 ${AXIS}${point.retractDistance}`,
         'G90',
@@ -2434,6 +2574,8 @@ class GrblController {
             probeCompensation: probeRadius * Math.sign(probeDistance),
             currentTouches: [],
             pendingAcks: 0,
+            retryAttempt: 0,
+            retryExtension: 0,
             result: null,
             config: {
               lineAxis,
@@ -2469,6 +2611,8 @@ class GrblController {
             probeCompensation: 0,
             currentTouches: [],
             pendingAcks: 0,
+            retryAttempt: 0,
+            retryExtension: 0,
             result: null,
             config: null,
           };
@@ -2493,6 +2637,7 @@ class GrblController {
             slowFeedrate,
             backoffDistance,
             settleDelay = 0.3,
+            zLift = 0,
             probeRadius = 0,
           } = params;
 
@@ -2515,13 +2660,21 @@ class GrblController {
           }));
           const yPoints = edgeprobe.createEdgeProbePoints({
             start: yEdge.start, end: yEdge.end, count: yEdge.pointCount,
-          }).map((p) => ({
+          }).map((p, i) => ({
             ...p,
             edge: 'y',
             probeAxis: 'y',
             target: p.y + yEdge.probeDistance,
             retractDistance: yEdge.retractDistance,
             probeCompensation: probeRadius * Math.sign(yEdge.probeDistance),
+            // Only the FIRST Y-edge point needs a Z-lift on approach -- it's
+            // the one point-to-point move that crosses from one edge's
+            // territory into the other's, where a same-Z single-axis move
+            // has no way to know if the path is actually clear. Within an
+            // edge, consecutive points share an approach axis close enough
+            // that axis-by-axis travel (see queueCornerProbePoint) is safe
+            // without lifting.
+            liftBeforeApproach: i === 0,
           }));
 
           const points = [...xPoints, ...yPoints];
@@ -2531,11 +2684,13 @@ class GrblController {
             probePoints: points,
             currentTouches: [],
             pendingAcks: 0,
+            retryAttempt: 0,
+            retryExtension: 0,
             result: null,
-            config: { ...params, feedrate, slowFeedrate, backoffDistance, settleDelay },
+            config: { ...params, feedrate, slowFeedrate, backoffDistance, settleDelay, zLift },
           };
 
-          log.info(`[cornerprobe:start] Start probing ${xPoints.length} X-edge points then ${yPoints.length} Y-edge points (fast=${feedrate}, slow=${slowFeedrate}, backoff=${backoffDistance}, settle=${settleDelay})`);
+          log.info(`[cornerprobe:start] Start probing ${xPoints.length} X-edge points then ${yPoints.length} Y-edge points (fast=${feedrate}, slow=${slowFeedrate}, backoff=${backoffDistance}, settle=${settleDelay}, zLift=${zLift})`);
 
           this.emit('cornerprobe:phase', { point: 0, total: points.length, phase: 'moving' });
           this.queueCornerProbePoint(0);
@@ -2547,6 +2702,8 @@ class GrblController {
             probePoints: [],
             currentTouches: [],
             pendingAcks: 0,
+            retryAttempt: 0,
+            retryExtension: 0,
             result: null,
             config: null,
           };

@@ -82,6 +82,7 @@ class EdgeSkewProbe extends PureComponent {
         isProbing,
         phase,
         touchLog,
+        retryInfo,
         error,
         progress,
         result,
@@ -348,6 +349,13 @@ class EdgeSkewProbe extends PureComponent {
                 {phase === 'probing-slow' && i18n._('Point {{current}} of {{total}}: slow touch (confirming)...', {
                   current: progress.current + 1,
                   total: progress.total,
+                })}
+                {phase === 'retrying' && retryInfo && i18n._('Point {{current}} of {{total}}: touch missed, retrying (attempt {{attempt}}, search +{{extension}}{{units}})...', {
+                  current: progress.current + 1,
+                  total: progress.total,
+                  attempt: retryInfo.attempt,
+                  extension: mapValueToUnits(retryInfo.extension, units).toFixed(1),
+                  units: displayUnits,
                 })}
                 {!phase && i18n._('Probing point {{current}} of {{total}}...', {
                   current: progress.current,

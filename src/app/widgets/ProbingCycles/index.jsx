@@ -96,6 +96,9 @@ class ProbingCyclesWidget extends PureComponent {
       setSettleDelay: (value) => {
         this.setState({ settleDelay: value });
       },
+      setZLift: (value) => {
+        this.setState({ zLift: value });
+      },
       setRetractDistance: (value) => {
         this.setState({ retractDistance: value });
       },
@@ -126,6 +129,7 @@ class ProbingCyclesWidget extends PureComponent {
           progress: { current: 0, total: pointCount },
           phase: 'moving',
           touchLog: [],
+          retryInfo: null,
           error: null,
           result: null,
         });
@@ -167,6 +171,7 @@ class ProbingCyclesWidget extends PureComponent {
           slowProbeFeedrate,
           backoffDistance,
           settleDelay,
+          zLift,
           probeTipDiameter,
         } = this.state;
         const xDir = find(PROBE_DIRECTIONS, { value: xEdgeDirection });
@@ -183,6 +188,7 @@ class ProbingCyclesWidget extends PureComponent {
           progress: { current: 0, total: xEdgePointCount + yEdgePointCount },
           phase: 'moving',
           touchLog: [],
+          retryInfo: null,
           error: null,
           result: null,
         });
@@ -206,6 +212,7 @@ class ProbingCyclesWidget extends PureComponent {
           slowFeedrate: slowProbeFeedrate,
           backoffDistance,
           settleDelay,
+          zLift,
           probeRadius: probeTipDiameter / 2,
         });
       },
@@ -275,6 +282,12 @@ class ProbingCyclesWidget extends PureComponent {
           phase: (data.touch < data.touchesPerPoint) ? 'probing-fast' : 'probing-slow',
         }));
       },
+      'edgeprobe:retry': (data) => {
+        this.setState({
+          phase: 'retrying',
+          retryInfo: data,
+        });
+      },
       'edgeprobe:update': (data) => {
         const { current, total } = data;
         this.setState({
@@ -307,6 +320,12 @@ class ProbingCyclesWidget extends PureComponent {
           touchLog: [...state.touchLog, data],
           phase: (data.touch < data.touchesPerPoint) ? 'probing-fast' : 'probing-slow',
         }));
+      },
+      'cornerprobe:retry': (data) => {
+        this.setState({
+          phase: 'retrying',
+          retryInfo: data,
+        });
       },
       'cornerprobe:update': (data) => {
         const { current, total } = data;
@@ -390,6 +409,7 @@ class ProbingCyclesWidget extends PureComponent {
         backoffDistance,
         retractDistance,
         probeTipDiameter,
+        zLift,
         xEdgeProbeDistance,
         xEdgeRetractDistance,
         yEdgeProbeDistance,
@@ -409,6 +429,7 @@ class ProbingCyclesWidget extends PureComponent {
         backoffDistance = in2mm(backoffDistance);
         retractDistance = in2mm(retractDistance);
         probeTipDiameter = in2mm(probeTipDiameter);
+        zLift = in2mm(zLift);
         xEdgeProbeDistance = in2mm(xEdgeProbeDistance);
         xEdgeRetractDistance = in2mm(xEdgeRetractDistance);
         yEdgeProbeDistance = in2mm(yEdgeProbeDistance);
@@ -426,6 +447,7 @@ class ProbingCyclesWidget extends PureComponent {
       this.config.set('backoffDistance', Number(backoffDistance));
       this.config.set('retractDistance', Number(retractDistance));
       this.config.set('probeTipDiameter', Number(probeTipDiameter));
+      this.config.set('zLift', Number(zLift));
       this.config.set('startPoint', savedStartPoint);
       this.config.set('endPoint', savedEndPoint);
       this.config.set('xEdgeProbeDistance', Number(xEdgeProbeDistance));
@@ -481,6 +503,7 @@ class ProbingCyclesWidget extends PureComponent {
         slowProbeFeedrate: Number(this.config.get('slowProbeFeedrate') || 10),
         backoffDistance: Number(this.config.get('backoffDistance') || 2),
         settleDelay: Number(this.config.get('settleDelay') ?? 0.3),
+        zLift: Number(this.config.get('zLift') ?? 5),
         retractDistance: Number(this.config.get('retractDistance') || 2),
         probeTipDiameter: Number(this.config.get('probeTipDiameter') || 0),
         xEdgeDirection: this.config.get('xEdgeDirection', 'x+'),
@@ -512,6 +535,7 @@ class ProbingCyclesWidget extends PureComponent {
         isProbing: false,
         phase: null,
         touchLog: [],
+        retryInfo: null,
         error: null,
         progress: { current: 0, total: 0 },
         result: null,

@@ -166,6 +166,7 @@ class CornerProbe extends PureComponent {
         slowProbeFeedrate,
         backoffDistance,
         settleDelay,
+        zLift,
         probeTipDiameter,
         toolProbeLength,
         toolProbeMaxDeflection,
@@ -173,6 +174,7 @@ class CornerProbe extends PureComponent {
         isProbing,
         phase,
         touchLog,
+        retryInfo,
         error,
         progress,
         result,
@@ -291,6 +293,29 @@ class CornerProbe extends PureComponent {
             </div>
           </div>
 
+          <div className="row no-gutters">
+            <div className="col-xs-6" style={{ paddingRight: 5 }}>
+              <div className="form-group">
+                <label className="control-label">{i18n._('Z Lift')}</label>
+                <div className="input-group input-group-sm">
+                  <input
+                    type="number"
+                    className="form-control"
+                    min={0}
+                    step={step}
+                    disabled={isProbing}
+                    value={zLift}
+                    onChange={(event) => actions.setZLift(Number(event.target.value) || 0)}
+                  />
+                  <span className="input-group-addon">{displayUnits}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+          <p style={{ marginTop: -4, marginBottom: 12 }}>
+            <i>{i18n._('How far to retract in Z before crossing from the X-edge to the Y-edge, and how far to plunge back down before probing resumes. This is the only point-to-point move that travels a real, unpredictable distance across your part — set it tall enough to clear the stock. Leave at 0 to disable (not recommended unless you\'ve verified the path is clear).')}</i>
+          </p>
+
           <div className="form-group">
             <label className="control-label">{i18n._('Probe Tip Diameter')}</label>
             <div className="input-group input-group-sm">
@@ -341,6 +366,13 @@ class CornerProbe extends PureComponent {
                 {phase === 'probing-slow' && i18n._('Point {{current}} of {{total}}: slow touch (confirming)...', {
                   current: progress.current + 1,
                   total: progress.total,
+                })}
+                {phase === 'retrying' && retryInfo && i18n._('Point {{current}} of {{total}}: touch missed, retrying (attempt {{attempt}}, search +{{extension}}{{units}})...', {
+                  current: progress.current + 1,
+                  total: progress.total,
+                  attempt: retryInfo.attempt,
+                  extension: mapValueToUnits(retryInfo.extension, units).toFixed(1),
+                  units: displayUnits,
                 })}
               </i>
             </div>
