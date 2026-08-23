@@ -185,7 +185,8 @@ class Tool extends PureComponent {
     const toolProbeDistance = get(toolConfig, 'toolProbeDistance');
     const toolProbeFeedrate = get(toolConfig, 'toolProbeFeedrate');
     const toolProbeLength = get(toolConfig, 'toolProbeLength');
-    const toolProbeMaxDeflection = get(toolConfig, 'toolProbeMaxDeflection');
+    const toolProbeMaxTravel = get(toolConfig, 'toolProbeMaxTravel');
+    const toolProbeMaxStylusDeflection = get(toolConfig, 'toolProbeMaxStylusDeflection');
     const touchPlateHeight = get(toolConfig, 'touchPlateHeight');
     const isManualToolChange = [
       TOOL_CHANGE_POLICY_MANUAL_TOOL_CHANGE_WCS,
@@ -804,17 +805,36 @@ class Tool extends PureComponent {
                 <div className="row no-gutters">
                   <div className="col-xs-6" style={{ paddingRight: 5 }}>
                     <div className="form-group">
-                      <label className="control-label">{i18n._('Max Probe Deflection')}</label>
+                      <label className="control-label">{i18n._('Max Probe Travel')}</label>
                       <div className="input-group input-group-sm">
                         <input
                           type="number"
                           className="form-control"
-                          value={toolProbeMaxDeflection}
+                          value={toolProbeMaxTravel}
                           min={0}
                           step={step}
                           onChange={(event) => {
                             const value = event.target.value;
-                            actions.setToolProbeMaxDeflection(value);
+                            actions.setToolProbeMaxTravel(value);
+                          }}
+                        />
+                        <span className="input-group-addon">{displayUnits}</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="col-xs-6" style={{ paddingLeft: 5 }}>
+                    <div className="form-group">
+                      <label className="control-label">{i18n._('Max Stylus Deflection')}</label>
+                      <div className="input-group input-group-sm">
+                        <input
+                          type="number"
+                          className="form-control"
+                          value={toolProbeMaxStylusDeflection}
+                          min={0}
+                          step={step}
+                          onChange={(event) => {
+                            const value = event.target.value;
+                            actions.setToolProbeMaxStylusDeflection(value);
                           }}
                         />
                         <span className="input-group-addon">{displayUnits}</span>
@@ -823,7 +843,10 @@ class Tool extends PureComponent {
                   </div>
                 </div>
                 <p style={{ marginTop: -4, marginBottom: 12 }}>
-                  <i>{i18n._('Max Probe Deflection is the farthest the probe stylus can safely travel before it\'s at risk of over-deflecting or the probe missing the surface entirely. Probing cycles use this to warn or block a run if the configured Probe Distance exceeds it. Leave at 0 to disable the check.')}</i>
+                  <i>{i18n._('Max Probe Travel is how far a probing cycle is allowed to search for contact. Probing cycles use this to warn or block a run if the configured Probe Distance exceeds it -- a crash-prevention limit on search travel, unrelated to the stylus itself. Leave at 0 to disable the check.')}</i>
+                </p>
+                <p style={{ marginTop: -4, marginBottom: 12 }}>
+                  <i>{i18n._('Max Stylus Deflection is the physical touch probe\'s own rated overtravel -- how far the stylus tip can safely compress after contact before risking damage. Recorded for reference; not yet used by any check.')}</i>
                 </p>
                 <div>
                   <div

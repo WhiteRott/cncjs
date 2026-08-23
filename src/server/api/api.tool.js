@@ -27,7 +27,8 @@ export const set = (req, res) => {
     'toolProbeDistance',
     'toolProbeFeedrate',
     'toolProbeLength',
-    'toolProbeMaxDeflection',
+    'toolProbeMaxTravel',
+    'toolProbeMaxStylusDeflection',
     'touchPlateHeight',
   ]);
   const invalidKeys = keys.filter((key) => !allowedKeySet.has(key));

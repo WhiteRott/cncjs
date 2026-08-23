@@ -169,8 +169,8 @@ class CornerProbe extends PureComponent {
         zLift,
         probeTipDiameter,
         toolProbeLength,
-        toolProbeMaxDeflection,
-        exceedsCornerMaxDeflection,
+        toolProbeMaxTravel,
+        exceedsCornerMaxTravel,
         isProbing,
         phase,
         touchLog,
@@ -207,10 +207,10 @@ class CornerProbe extends PureComponent {
             </div>
           )}
 
-          {exceedsCornerMaxDeflection && (
+          {exceedsCornerMaxTravel && (
             <div className="alert alert-warning" style={{ padding: '6px 10px', marginBottom: 12 }}>
-              {i18n._('A Probe Distance exceeds the configured Max Probe Deflection ({{max}}{{units}}). Reduce it or raise the limit in the Tool widget before running.', {
-                max: mapValueToUnits(toolProbeMaxDeflection, units).toFixed(3),
+              {i18n._('A Probe Distance exceeds the configured Max Probe Travel ({{max}}{{units}}). Reduce it or raise the limit in the Tool widget before running.', {
+                max: mapValueToUnits(toolProbeMaxTravel, units).toFixed(3),
                 units: displayUnits,
               })}
             </div>

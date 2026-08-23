@@ -77,8 +77,8 @@ class EdgeSkewProbe extends PureComponent {
         retractDistance,
         probeTipDiameter,
         toolProbeLength,
-        toolProbeMaxDeflection,
-        exceedsMaxDeflection,
+        toolProbeMaxTravel,
+        exceedsMaxTravel,
         isProbing,
         phase,
         touchLog,
@@ -187,10 +187,10 @@ class EdgeSkewProbe extends PureComponent {
             </div>
           )}
 
-          {exceedsMaxDeflection && (
+          {exceedsMaxTravel && (
             <div className="alert alert-warning" style={{ padding: '6px 10px', marginBottom: 12 }}>
-              {i18n._('Probe Distance exceeds the configured Max Probe Deflection ({{max}}{{units}}). Reduce Probe Distance or raise the limit in the Tool widget before running.', {
-                max: mapValueToUnits(toolProbeMaxDeflection, units).toFixed(3),
+              {i18n._('Probe Distance exceeds the configured Max Probe Travel ({{max}}{{units}}). Reduce Probe Distance or raise the limit in the Tool widget before running.', {
+                max: mapValueToUnits(toolProbeMaxTravel, units).toFixed(3),
                 units: displayUnits,
               })}
             </div>

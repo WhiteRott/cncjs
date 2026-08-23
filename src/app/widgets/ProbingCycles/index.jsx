@@ -120,7 +120,7 @@ class ProbingCyclesWidget extends PureComponent {
         if (!dir) {
           return;
         }
-        if (this.exceedsMaxDeflection()) {
+        if (this.exceedsMaxTravel()) {
           return;
         }
 
@@ -179,7 +179,7 @@ class ProbingCyclesWidget extends PureComponent {
         if (!xDir || !yDir) {
           return;
         }
-        if (this.exceedsCornerMaxDeflection()) {
+        if (this.exceedsCornerMaxTravel()) {
           return;
         }
 
@@ -362,7 +362,10 @@ class ProbingCyclesWidget extends PureComponent {
         const tool = res.body;
         this.setState({
           toolProbeLength: Number(get(tool, 'toolProbeLength', 0)),
-          toolProbeMaxDeflection: Number(get(tool, 'toolProbeMaxDeflection', 0)),
+          // toolProbeMaxDeflection was renamed to toolProbeMaxTravel -- see
+          // the Tool widget for why. Fall back to the old key so a
+          // previously-configured limit isn't silently lost.
+          toolProbeMaxTravel: Number(get(tool, 'toolProbeMaxTravel', get(tool, 'toolProbeMaxDeflection', 0))),
         });
       } catch (err) {
         log.error(err);
@@ -531,7 +534,7 @@ class ProbingCyclesWidget extends PureComponent {
         yEdgeProbeDistance: Number(this.config.get('yEdgeProbeDistance') || 10),
         yEdgeRetractDistance: Number(this.config.get('yEdgeRetractDistance') || 2),
         toolProbeLength: 0,
-        toolProbeMaxDeflection: 0,
+        toolProbeMaxTravel: 0,
         isProbing: false,
         phase: null,
         touchLog: [],
@@ -578,22 +581,22 @@ class ProbingCyclesWidget extends PureComponent {
       return true;
     }
 
-    exceedsMaxDeflection() {
-      const { probeDistance, toolProbeMaxDeflection } = this.state;
-      if (!toolProbeMaxDeflection) {
+    exceedsMaxTravel() {
+      const { probeDistance, toolProbeMaxTravel } = this.state;
+      if (!toolProbeMaxTravel) {
         return false;
       }
-      return Math.abs(probeDistance) > toolProbeMaxDeflection;
+      return Math.abs(probeDistance) > toolProbeMaxTravel;
     }
 
-    exceedsCornerMaxDeflection() {
-      const { xEdgeProbeDistance, yEdgeProbeDistance, toolProbeMaxDeflection } = this.state;
-      if (!toolProbeMaxDeflection) {
+    exceedsCornerMaxTravel() {
+      const { xEdgeProbeDistance, yEdgeProbeDistance, toolProbeMaxTravel } = this.state;
+      if (!toolProbeMaxTravel) {
         return false;
       }
       return (
-        Math.abs(xEdgeProbeDistance) > toolProbeMaxDeflection ||
-        Math.abs(yEdgeProbeDistance) > toolProbeMaxDeflection
+        Math.abs(xEdgeProbeDistance) > toolProbeMaxTravel ||
+        Math.abs(yEdgeProbeDistance) > toolProbeMaxTravel
       );
     }
 
@@ -601,13 +604,13 @@ class ProbingCyclesWidget extends PureComponent {
       const { widgetId } = this.props;
       const { minimized, isFullscreen, probeType } = this.state;
       const isForkedWidget = widgetId.match(/\w+:[\w\-]+/);
-      const exceedsMaxDeflection = (probeType === 'corner') ? this.exceedsCornerMaxDeflection() : this.exceedsMaxDeflection();
+      const exceedsMaxTravel = (probeType === 'corner') ? this.exceedsCornerMaxTravel() : this.exceedsMaxTravel();
       const state = {
         ...this.state,
-        canClick: this.canClick() && !exceedsMaxDeflection,
+        canClick: this.canClick() && !exceedsMaxTravel,
         canGetPosition: this.canClick(),
-        exceedsMaxDeflection: this.exceedsMaxDeflection(),
-        exceedsCornerMaxDeflection: this.exceedsCornerMaxDeflection(),
+        exceedsMaxTravel: this.exceedsMaxTravel(),
+        exceedsCornerMaxTravel: this.exceedsCornerMaxTravel(),
       };
       const actions = {
         ...this.actions
