@@ -133,6 +133,23 @@ describes the probe-length piece; needs a rewrite before marking ready for revie
      sequencing — an in-flight `$G` query's reply could land mid-cycle and get consumed by
      flag-matching instead of content, swallowing the probe's own `ok` and stalling the feed
      queue. Fixed via pendingAcks-based `ok` priority handling.
+   - **⚠️ UNVERIFIED — X-edge → Y-edge transition stall fix, on branch
+     `fix/probing-cycle-x-to-y-transition` (built off `feature/tool-library`, not yet merged
+     back).** Reported symptom: the last X-edge point would touch and then just stop — no
+     retract, no error — leaving the app stuck (Start greyed out, most of the UI unusable)
+     until Stop was pressed. Root cause: `queueCornerProbePoint`/`queueEdgeProbePoint`
+     queued the next point's G-code the instant a point's PRB report arrived, before that
+     same point's own trailing retract had actually been acknowledged — partial
+     confirmation, not a closed loop. Fixed by adding `nextPointIndex` to
+     `edgeProbeState`/`cornerProbeState`: the PRB handler now just records which point comes
+     next, and the `ok` handler only queues it once `pendingAcks` confirms every line of the
+     current point — including its retract — actually got acknowledged. Verified with a new
+     regression test (`GrblController.probingCycles.test.js`) that drives a real
+     `GrblController` instance through a full corner-probe cycle via a fake serial harness —
+     completes end-to-end with the feeder queue fully drained, no interleave at the
+     transition. Standing rule: stays unverified until the user has run a corner probe on
+     the HiMill and confirmed it no longer stalls — passing the regression test alone is not
+     sufficient.
 
 ### Widget map (Probe / Zero Probe / ProbingCycles / Autolevel / Tool / ToolLibrary)
 - `src/app/widgets/Probe/` (**Zero Probe**) — simple manual single-axis touch-off
