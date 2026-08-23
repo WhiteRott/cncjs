@@ -190,6 +190,12 @@ class GrblController {
       // the points-remaining comparison can't see.
       pendingAcks: 0,
 
+      // Set (to the next point's index) once a point's PRB report arrives
+      // but before its own trailing G-code is fully acknowledged; drained
+      // by the 'ok' handler once pendingAcks hits 0, so the next point
+      // never starts on partial confirmation.
+      nextPointIndex: null,
+
       // How many times the current point has been retried after a touch
       // failed to make contact, and how far the search distance has been
       // extended (mm) for the current retry -- both reset to 0 whenever a
@@ -214,6 +220,7 @@ class GrblController {
       probePoints: [],
       currentTouches: [],
       pendingAcks: 0,
+      nextPointIndex: null,
       retryAttempt: 0,
       retryExtension: 0,
       // { x, y } intersection of the two probed edges
@@ -710,7 +717,28 @@ class GrblController {
           this.edgeProbeState.pendingAcks = Math.max(0, this.edgeProbeState.pendingAcks - 1);
           this.cornerProbeState.pendingAcks = Math.max(0, this.cornerProbeState.pendingAcks - 1);
           this.emit('serialport:read', res.raw);
-          this.feeder.next();
+
+          // Closing the loop: a point's next-point index is set (see the
+          // PRB handler) the moment its PRB report arrives, but its own
+          // trailing G-code (the retract after the slow touch) is still
+          // unacknowledged at that instant. Only start the next point once
+          // pendingAcks confirms EVERY line of this one -- including that
+          // retract -- actually got an 'ok', not just the probe touch
+          // itself. queueEdgeProbePoint/queueCornerProbePoint feed fresh
+          // lines while the feeder queue is empty, so they send the first
+          // one themselves -- calling feeder.next() as well in that branch
+          // would send a second line before the first one's 'ok' arrives.
+          if (this.edgeProbeState.pendingAcks === 0 && this.edgeProbeState.nextPointIndex !== null) {
+            const nextIndex = this.edgeProbeState.nextPointIndex;
+            this.edgeProbeState.nextPointIndex = null;
+            this.queueEdgeProbePoint(nextIndex);
+          } else if (this.cornerProbeState.pendingAcks === 0 && this.cornerProbeState.nextPointIndex !== null) {
+            const nextIndex = this.cornerProbeState.nextPointIndex;
+            this.cornerProbeState.nextPointIndex = null;
+            this.queueCornerProbePoint(nextIndex);
+          } else {
+            this.feeder.next();
+          }
           return;
         }
 
@@ -1010,7 +1038,17 @@ class GrblController {
                   total: state.probePoints.length,
                   phase: 'moving',
                 });
-                this.queueEdgeProbePoint(nextIndex);
+                // Don't queue the next point's G-code yet -- this point's
+                // own trailing retract (the lines after the slow touch
+                // that just reported PRB) are still sitting unacknowledged
+                // in the feeder. Queuing on top of them isn't wrong by
+                // itself (the feeder is strictly FIFO), but it means the
+                // next point only starts once pendingAcks says this one is
+                // FULLY done, not just probed -- closing the loop instead
+                // of assuming the retract will get there. See the 'ok'
+                // handler above, which queues nextPointIndex once
+                // pendingAcks reaches 0.
+                state.nextPointIndex = nextIndex;
               }
             }
 
@@ -1099,7 +1137,16 @@ class GrblController {
                   total: state.probePoints.length,
                   phase: 'moving',
                 });
-                this.queueCornerProbePoint(nextIndex);
+                // Same reasoning as the edgeprobe branch above: defer
+                // queuing the next point (which, at an edge transition, is
+                // the Z-lift move) until this point's own trailing retract
+                // is confirmed acknowledged, not just probed. This is the
+                // specific transition that was reported to sometimes stop
+                // dead at the touch with no retract and no error -- queuing
+                // the next point's G-code while this point's own tail is
+                // still unacknowledged is exactly the kind of partial
+                // confirmation a closed loop is supposed to rule out.
+                state.nextPointIndex = nextIndex;
               }
             }
 
@@ -1156,6 +1203,7 @@ class GrblController {
                 probeCompensation: 0,
                 currentTouches: [],
                 pendingAcks: 0,
+                nextPointIndex: null,
                 retryAttempt: 0,
                 retryExtension: 0,
                 result: null,
@@ -1183,6 +1231,7 @@ class GrblController {
                 probePoints: [],
                 currentTouches: [],
                 pendingAcks: 0,
+                nextPointIndex: null,
                 retryAttempt: 0,
                 retryExtension: 0,
                 result: null,
@@ -2574,6 +2623,13 @@ class GrblController {
             probeCompensation: probeRadius * Math.sign(probeDistance),
             currentTouches: [],
             pendingAcks: 0,
+            // Set (to the next point's index) once a point's PRB report
+            // arrives but before its own trailing G-code is fully
+            // acknowledged; drained by the 'ok' handler once pendingAcks
+            // hits 0, so the next point never starts on partial
+            // confirmation. See the 'ok' handler's isProbeCycleActive()
+            // branch.
+            nextPointIndex: null,
             retryAttempt: 0,
             retryExtension: 0,
             result: null,
@@ -2611,6 +2667,13 @@ class GrblController {
             probeCompensation: 0,
             currentTouches: [],
             pendingAcks: 0,
+            // Set (to the next point's index) once a point's PRB report
+            // arrives but before its own trailing G-code is fully
+            // acknowledged; drained by the 'ok' handler once pendingAcks
+            // hits 0, so the next point never starts on partial
+            // confirmation. See the 'ok' handler's isProbeCycleActive()
+            // branch.
+            nextPointIndex: null,
             retryAttempt: 0,
             retryExtension: 0,
             result: null,
@@ -2684,6 +2747,13 @@ class GrblController {
             probePoints: points,
             currentTouches: [],
             pendingAcks: 0,
+            // Set (to the next point's index) once a point's PRB report
+            // arrives but before its own trailing G-code is fully
+            // acknowledged; drained by the 'ok' handler once pendingAcks
+            // hits 0, so the next point never starts on partial
+            // confirmation. See the 'ok' handler's isProbeCycleActive()
+            // branch.
+            nextPointIndex: null,
             retryAttempt: 0,
             retryExtension: 0,
             result: null,
@@ -2702,6 +2772,13 @@ class GrblController {
             probePoints: [],
             currentTouches: [],
             pendingAcks: 0,
+            // Set (to the next point's index) once a point's PRB report
+            // arrives but before its own trailing G-code is fully
+            // acknowledged; drained by the 'ok' handler once pendingAcks
+            // hits 0, so the next point never starts on partial
+            // confirmation. See the 'ok' handler's isProbeCycleActive()
+            // branch.
+            nextPointIndex: null,
             retryAttempt: 0,
             retryExtension: 0,
             result: null,
