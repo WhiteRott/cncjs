@@ -89,8 +89,11 @@ describes the probe-length piece; needs a rewrite before marking ready for revie
    selection, one record flagged at a time).
 2. **Tool length offsets** — hook into GRBL/grblHAL's tool length offset workflow (relevant
    G-codes: G43.1, G49), store a per-tool Z offset, apply it on tool change.
-   **Done, on branch `feature/per-tool-z-offsets` (built off `feature/tool-library`, not yet
-   merged back).** Global probe-length compensation (`toolProbeLength`, described below)
+   **⚠️ UNVERIFIED — code complete and pushed on branch `feature/per-tool-z-offsets` (built
+   off `feature/tool-library`, not yet merged back), full test suite green, but NOT
+   physically tested on real hardware.** Standing rule: this stays unverified until the user
+   has run it on the HiMill and confirmed the offset math is correct — passing automated
+   tests alone is not sufficient. Global probe-length compensation (`toolProbeLength`, described below)
    already worked; this adds actual per-tool persistence on top of it. Design choice: the
    TLO tool-change routine still probes on *every* tool change exactly as before (no change
    to physical motion) — it now additionally records the freshly-computed offset into that
