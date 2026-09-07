@@ -120,7 +120,7 @@ class ProbingCyclesWidget extends PureComponent {
         if (!dir) {
           return;
         }
-        if (this.exceedsMaxTravel()) {
+        if (this.exceedsMaxTravel() || this.exceedsStylusDeflection()) {
           return;
         }
 
@@ -179,7 +179,7 @@ class ProbingCyclesWidget extends PureComponent {
         if (!xDir || !yDir) {
           return;
         }
-        if (this.exceedsCornerMaxTravel()) {
+        if (this.exceedsCornerMaxTravel() || this.exceedsStylusDeflection()) {
           return;
         }
 
@@ -237,6 +237,9 @@ class ProbingCyclesWidget extends PureComponent {
             state: workflowState
           }
         }));
+      },
+      'controller:settings': (type, settings) => {
+        this.setState({ controllerSettings: settings });
       },
       'controller:state': (type, state) => {
         let units = this.state.units;
@@ -366,6 +369,7 @@ class ProbingCyclesWidget extends PureComponent {
           // the Tool widget for why. Fall back to the old key so a
           // previously-configured limit isn't silently lost.
           toolProbeMaxTravel: Number(get(tool, 'toolProbeMaxTravel', get(tool, 'toolProbeMaxDeflection', 0))),
+          toolProbeMaxStylusDeflection: Number(get(tool, 'toolProbeMaxStylusDeflection', 0)),
         });
       } catch (err) {
         log.error(err);
@@ -535,6 +539,10 @@ class ProbingCyclesWidget extends PureComponent {
         yEdgeRetractDistance: Number(this.config.get('yEdgeRetractDistance') || 2),
         toolProbeLength: 0,
         toolProbeMaxTravel: 0,
+        toolProbeMaxStylusDeflection: 0,
+        // grblHAL's $12x acceleration values, needed to estimate how far the
+        // machine overtravels past contact (see estimateOvertravel).
+        controllerSettings: controller.settings,
         isProbing: false,
         phase: null,
         touchLog: [],
@@ -600,17 +608,73 @@ class ProbingCyclesWidget extends PureComponent {
       );
     }
 
+    // Axis acceleration in mm/s^2 from grblHAL's $120/$121/$122. Returns null
+    // when settings haven't arrived yet (not connected, or still handshaking)
+    // rather than guessing -- callers skip the estimate instead of showing a
+    // number derived from a made-up acceleration.
+    getAxisAcceleration(axis) {
+      const key = { x: '$120', y: '$121', z: '$122' }[axis];
+      const raw = get(this.state.controllerSettings, ['settings', key]);
+      const accel = Number(raw);
+      return (Number.isFinite(accel) && accel > 0) ? accel : null;
+    }
+
+    // How far the machine keeps moving after G38.2 trips, which is exactly
+    // what the stylus has to absorb as deflection. It's a deceleration-limited
+    // stop from the probing feed: d = v^2 / (2a), with v converted mm/min ->
+    // mm/s. Deliberately ignores controller/probe-input latency, so this is a
+    // floor on real overtravel, not a worst case.
+    estimateOvertravel(axis, feedMmPerMin) {
+      const accel = this.getAxisAcceleration(axis);
+      const feed = Number(feedMmPerMin);
+      if (accel === null || !Number.isFinite(feed) || feed <= 0) {
+        return null;
+      }
+      const v = feed / 60;
+      return (v * v) / (2 * accel);
+    }
+
+    // Worst-case overtravel across the axes this cycle will probe, using the
+    // fast feed (the slow confirm touch is always gentler).
+    worstCaseOvertravel() {
+      const { probeType, probeFeedrate, direction } = this.state;
+      const axes = (probeType === 'corner')
+        ? ['x', 'y']
+        : [String(direction || 'x').charAt(0)];
+      const estimates = axes
+        .map((axis) => this.estimateOvertravel(axis, probeFeedrate))
+        .filter((d) => d !== null);
+      return estimates.length ? Math.max(...estimates) : null;
+    }
+
+    // Blocks a run whose stop distance would compress the stylus past its
+    // rated travel. Unknown acceleration or an unset limit means no opinion.
+    exceedsStylusDeflection() {
+      const { toolProbeMaxStylusDeflection } = this.state;
+      if (!toolProbeMaxStylusDeflection) {
+        return false;
+      }
+      const overtravel = this.worstCaseOvertravel();
+      if (overtravel === null) {
+        return false;
+      }
+      return overtravel > toolProbeMaxStylusDeflection;
+    }
+
     render() {
       const { widgetId } = this.props;
       const { minimized, isFullscreen, probeType } = this.state;
       const isForkedWidget = widgetId.match(/\w+:[\w\-]+/);
       const exceedsMaxTravel = (probeType === 'corner') ? this.exceedsCornerMaxTravel() : this.exceedsMaxTravel();
+      const exceedsStylusDeflection = this.exceedsStylusDeflection();
       const state = {
         ...this.state,
-        canClick: this.canClick() && !exceedsMaxTravel,
+        canClick: this.canClick() && !exceedsMaxTravel && !exceedsStylusDeflection,
         canGetPosition: this.canClick(),
         exceedsMaxTravel: this.exceedsMaxTravel(),
         exceedsCornerMaxTravel: this.exceedsCornerMaxTravel(),
+        exceedsStylusDeflection,
+        estimatedOvertravel: this.worstCaseOvertravel(),
       };
       const actions = {
         ...this.actions

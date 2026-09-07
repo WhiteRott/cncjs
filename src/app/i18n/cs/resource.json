@@ -690,7 +690,6 @@
   "Probe Distance exceeds the configured Max Probe Travel ({{max}}{{units}}). Reduce Probe Distance or raise the limit in the Tool widget before running.": "",
   "Max Probe Travel": "",
   "Max Stylus Deflection": "",
-  "Max Stylus Deflection is the physical touch probe's own rated overtravel -- how far the stylus tip can safely compress after contact before risking damage. Recorded for reference; not yet used by any check.": "",
   "Max Probe Travel is how far a probing cycle is allowed to search for contact. Probing cycles use this to warn or block a run if the configured Probe Distance exceeds it -- a crash-prevention limit on search travel, unrelated to the stylus itself. Leave at 0 to disable the check.": "",
   "Fast Probe Feedrate": "",
   "Slow Probe Feedrate": "",
@@ -720,5 +719,8 @@
   "Edge": "",
   "Point {{current}} of {{total}}: touch missed, retrying (attempt {{attempt}}, search +{{extension}}{{units}})...": "",
   "Z Lift": "",
-  "How far to retract in Z before crossing from the X-edge to the Y-edge, and how far to plunge back down before probing resumes. This is the only point-to-point move that travels a real, unpredictable distance across your part — set it tall enough to clear the stock. Leave at 0 to disable (not recommended unless you've verified the path is clear).": ""
+  "How far to retract in Z before crossing from the X-edge to the Y-edge, and how far to plunge back down before probing resumes. This is the only point-to-point move that travels a real, unpredictable distance across your part — set it tall enough to clear the stock. Leave at 0 to disable (not recommended unless you've verified the path is clear).": "",
+  "At {{feed}}{{feedUnits}} the machine needs about {{overtravel}}{{units}} to stop after contact, past the stylus's {{max}}{{units}} of travel. Lower the Fast Probe Feedrate, or raise Max Stylus Deflection in the Tool widget if the stylus can take more.": "",
+  "Estimated overtravel after contact at this feedrate: {{overtravel}}{{units}} of the stylus's {{max}}{{units}}.": "",
+  "Max Stylus Deflection is the physical touch probe's own rated overtravel -- how far the stylus tip can safely compress after contact before risking damage. Probing cycles compare it against how far the machine needs to decelerate to a stop after the probe trips (from the probing feedrate and the axis acceleration, $120-$122) and block a run that would over-compress the stylus. Leave at 0 to disable the check.": ""
 }

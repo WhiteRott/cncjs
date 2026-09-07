@@ -846,7 +846,7 @@ class Tool extends PureComponent {
                   <i>{i18n._('Max Probe Travel is how far a probing cycle is allowed to search for contact. Probing cycles use this to warn or block a run if the configured Probe Distance exceeds it -- a crash-prevention limit on search travel, unrelated to the stylus itself. Leave at 0 to disable the check.')}</i>
                 </p>
                 <p style={{ marginTop: -4, marginBottom: 12 }}>
-                  <i>{i18n._('Max Stylus Deflection is the physical touch probe\'s own rated overtravel -- how far the stylus tip can safely compress after contact before risking damage. Recorded for reference; not yet used by any check.')}</i>
+                  <i>{i18n._('Max Stylus Deflection is the physical touch probe\'s own rated overtravel -- how far the stylus tip can safely compress after contact before risking damage. Probing cycles compare it against how far the machine needs to decelerate to a stop after the probe trips (from the probing feedrate and the axis acceleration, $120-$122) and block a run that would over-compress the stylus. Leave at 0 to disable the check.')}</i>
                 </p>
                 <div>
                   <div

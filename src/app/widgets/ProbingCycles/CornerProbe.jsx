@@ -171,6 +171,9 @@ class CornerProbe extends PureComponent {
         toolProbeLength,
         toolProbeMaxTravel,
         exceedsCornerMaxTravel,
+        exceedsStylusDeflection,
+        estimatedOvertravel,
+        toolProbeMaxStylusDeflection,
         isProbing,
         phase,
         touchLog,
@@ -214,6 +217,29 @@ class CornerProbe extends PureComponent {
                 units: displayUnits,
               })}
             </div>
+          )}
+
+          {exceedsStylusDeflection && (
+            <div className="alert alert-warning" style={{ padding: '6px 10px', marginBottom: 12 }}>
+              {i18n._('At {{feed}}{{feedUnits}} the machine needs about {{overtravel}}{{units}} to stop after contact, past the stylus\'s {{max}}{{units}} of travel. Lower the Fast Probe Feedrate, or raise Max Stylus Deflection in the Tool widget if the stylus can take more.', {
+                feed: probeFeedrate,
+                feedUnits: feedrateUnits,
+                overtravel: mapValueToUnits(estimatedOvertravel || 0, units).toFixed(3),
+                max: mapValueToUnits(toolProbeMaxStylusDeflection, units).toFixed(3),
+                units: displayUnits,
+              })}
+            </div>
+          )}
+
+          {!exceedsStylusDeflection && toolProbeMaxStylusDeflection > 0 && estimatedOvertravel !== null && (
+            <p style={{ marginBottom: 12 }}>
+              <i>{i18n._('Estimated overtravel after contact at this feedrate: {{overtravel}}{{units}} of the stylus\'s {{max}}{{units}}.', {
+                overtravel: mapValueToUnits(estimatedOvertravel, units).toFixed(3),
+                max: mapValueToUnits(toolProbeMaxStylusDeflection, units).toFixed(3),
+                units: displayUnits,
+              })}
+              </i>
+            </p>
           )}
 
           <div className="row no-gutters">
