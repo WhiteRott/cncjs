@@ -22,7 +22,7 @@ const defaultState = {
       secondary: {
         show: true,
         widgets: [
-          'axes', 'gcode', 'macro', 'autolevel', 'probe', 'tool', 'spindle', 'laser',
+          'axes', 'gcode', 'macro', 'autolevel', 'probe', 'probingCycles', 'tool', 'toolLibrary', 'spindle', 'laser',
         ]
       }
     },
@@ -167,6 +167,9 @@ const defaultState = {
       touchPlateHeight: 10,
       retractionDistance: 4
     },
+    probingCycles: {
+      minimized: false,
+    },
     smoothie: {
       minimized: false,
       panel: {
@@ -200,6 +203,9 @@ const defaultState = {
       }
     },
     tool: {
+      minimized: false,
+    },
+    toolLibrary: {
       minimized: false,
     },
     visualizer: {

@@ -166,6 +166,22 @@ class ToolWidget extends PureComponent {
         },
       });
     },
+    setToolProbeLength: (value) => {
+      this.setState({
+        toolConfig: {
+          ...this.state.toolConfig,
+          toolProbeLength: value,
+        },
+      });
+    },
+    setToolProbeMaxDeflection: (value) => {
+      this.setState({
+        toolConfig: {
+          ...this.state.toolConfig,
+          toolProbeMaxDeflection: value,
+        },
+      });
+    },
   };
 
   controllerEvents = {
@@ -313,6 +329,8 @@ class ToolWidget extends PureComponent {
           toolProbeX: mapPositionToUnits(this.toolConfig.get('toolProbeX'), units),
           toolProbeY: mapPositionToUnits(this.toolConfig.get('toolProbeY'), units),
           toolProbeZ: mapPositionToUnits(this.toolConfig.get('toolProbeZ'), units),
+          toolProbeLength: mapValueToUnits(this.toolConfig.get('toolProbeLength'), units),
+          toolProbeMaxDeflection: mapValueToUnits(this.toolConfig.get('toolProbeMaxDeflection'), units),
           touchPlateHeight: mapValueToUnits(this.toolConfig.get('touchPlateHeight'), units),
         },
       });
@@ -339,6 +357,8 @@ class ToolWidget extends PureComponent {
       this.toolConfig.set('toolProbeCommand', ensureString(get(tool, 'toolProbeCommand', 'G38.2')));
       this.toolConfig.set('toolProbeDistance', ensureNumber(get(tool, 'toolProbeDistance', 1)));
       this.toolConfig.set('toolProbeFeedrate', ensureNumber(get(tool, 'toolProbeFeedrate', 10)));
+      this.toolConfig.set('toolProbeLength', ensureNumber(get(tool, 'toolProbeLength', 0)));
+      this.toolConfig.set('toolProbeMaxDeflection', ensureNumber(get(tool, 'toolProbeMaxDeflection', 0)));
       this.toolConfig.set('touchPlateHeight', ensureNumber(get(tool, 'touchPlateHeight', 0)));
 
       // The state reflects the values in the current display units
@@ -355,6 +375,8 @@ class ToolWidget extends PureComponent {
           toolProbeCommand: this.toolConfig.get('toolProbeCommand'),
           toolProbeDistance: mapValueToUnits(this.toolConfig.get('toolProbeDistance'), units),
           toolProbeFeedrate: mapValueToUnits(this.toolConfig.get('toolProbeFeedrate'), units),
+          toolProbeLength: mapValueToUnits(this.toolConfig.get('toolProbeLength'), units),
+          toolProbeMaxDeflection: mapValueToUnits(this.toolConfig.get('toolProbeMaxDeflection'), units),
           touchPlateHeight: mapValueToUnits(this.toolConfig.get('touchPlateHeight'), units),
         },
       });
@@ -418,6 +440,8 @@ class ToolWidget extends PureComponent {
       toolProbeX,
       toolProbeY,
       toolProbeZ,
+      toolProbeLength,
+      toolProbeMaxDeflection,
       touchPlateHeight,
     } = this.state.toolConfig;
 
@@ -433,6 +457,8 @@ class ToolWidget extends PureComponent {
     this.toolConfig.set('toolProbeCommand', ensureString(toolProbeCommand));
     this.toolConfig.set('toolProbeDistance', toMetric(toolProbeDistance));
     this.toolConfig.set('toolProbeFeedrate', toMetric(toolProbeFeedrate));
+    this.toolConfig.set('toolProbeLength', toMetric(toolProbeLength));
+    this.toolConfig.set('toolProbeMaxDeflection', toMetric(toolProbeMaxDeflection));
     this.toolConfig.set('touchPlateHeight', toMetric(touchPlateHeight));
   }
 

@@ -8,6 +8,8 @@ import fsp from 'fs/promises';
 import * as gcodeParser from 'gcode-parser';
 import _ from 'lodash';
 import * as autolevel from '../../lib/autolevel';
+import * as edgeprobe from '../../lib/edgeprobe';
+import * as probecycles from '../../lib/probecycles';
 import EventTrigger from '../../lib/EventTrigger';
 import Feeder from '../../lib/Feeder';
 import MessageSlot from '../../lib/MessageSlot';
@@ -152,6 +154,95 @@ class GrblController {
       probePoints: [],
 
       // The probe configuration
+      config: null,
+    };
+
+    // Edge Probe - multi-point line/skew probe state tracking
+    edgeProbeState = {
+      // The probed positions in the form of [{x, y, z}, ...]
+      probedPositions: [],
+
+      // The probe points in the form of [{x, y}, ...]
+      probePoints: [],
+
+      // Which axis the probe points are spaced along, and which axis is
+      // probed (perpendicular) at each point
+      lineAxis: null,
+      probeAxis: null,
+
+      // Ball-tip stylus radius compensation, added to each reported
+      // contact position along probeAxis (see the 'PRB' handler)
+      probeCompensation: 0,
+
+      // Touches recorded for the point currently in progress (2-touch
+      // cycle: fast find, back off, slow confirm). Cleared once the point
+      // is finalized -- only the 2nd (slow) touch is kept in
+      // probedPositions, the 1st is only used for the fast approach.
+      currentTouches: [],
+
+      // Number of 'ok' responses still owed to us for G-code already
+      // queued (incremented by queueEdgeProbePoint, decremented in the
+      // 'ok' handler). probePoints/probedPositions alone go "complete" the
+      // instant the last point's final PRB arrives -- but that point's
+      // trailing retract move is still queued behind it and needs its own
+      // 'ok' to be routed correctly too. This counter keeps the cycle
+      // considered active through that last retract, closing the one gap
+      // the points-remaining comparison can't see.
+      pendingAcks: 0,
+
+      // How many times the current point has been retried after a touch
+      // failed to make contact, and how far the search distance has been
+      // extended (mm) for the current retry -- both reset to 0 whenever a
+      // point finalizes and the cycle moves on. See the PRB failure
+      // handler and queueEdgeProbePoint.
+      retryAttempt: 0,
+      retryExtension: 0,
+
+      // The line fit computed once all points are probed:
+      // { slope, intercept, angleRad, angleDeg }
+      result: null,
+
+      // The probe configuration
+      config: null,
+    };
+
+    // Corner Probe - two-edge intersection probe state tracking. Each
+    // point is touched twice (fast find, back off, slow confirm), same
+    // theory as edgeProbeState -- see queueCornerProbePoint.
+    cornerProbeState = {
+      probedPositions: [],
+      probePoints: [],
+      currentTouches: [],
+      pendingAcks: 0,
+      retryAttempt: 0,
+      retryExtension: 0,
+      // { x, y } intersection of the two probed edges
+      result: null,
+      config: null,
+    };
+
+    // Circle Probe - shared by Bore (inside a hole) and Boss (outside a
+    // post) probes; same N-point circle fit, opposite approach direction
+    circleProbeState = {
+      probedPositions: [],
+      probePoints: [],
+      // 'bore' | 'boss'
+      mode: null,
+      // { centerX, centerY, radius, diameter }
+      result: null,
+      config: null,
+    };
+
+    // Rectangle Probe - shared by Rectangular Pocket (inside a cavity) and
+    // Rectangular Solid (outside a block) probes; same 4-wall fit,
+    // opposite approach direction
+    rectProbeState = {
+      probedPositions: [],
+      probePoints: [],
+      // 'pocket' | 'solid'
+      mode: null,
+      // { centerX, centerY, width, length }
+      result: null,
       config: null,
     };
 
@@ -593,6 +684,36 @@ class GrblController {
       });
 
       this.runner.on('ok', (res) => {
+        // A custom probe cycle always uses the feeder directly, never the
+        // sender/workflow (that's for loaded G-code programs) -- and it
+        // takes absolute priority here, checked before even the $G
+        // parser-state reply tracking below. A $G query can already be in
+        // flight (sent moments before the cycle started) with its
+        // [GC:...]+ok reply arriving mid-cycle; since that reply is
+        // consumed by matching against a flag rather than by content, it
+        // can land on -- and swallow -- the probe's own 'ok' regardless of
+        // the isProbeCycleActive() guard in queryParserState() below (that
+        // guard only stops *new* queries from being sent during a cycle,
+        // it can't un-send one already on the wire). Reordering so probe
+        // cycles always win removes the ambiguity entirely: while a cycle
+        // is active, every incoming 'ok' goes to the feeder, full stop.
+        // Sending feeder.next() an extra time for a stray reply is a
+        // harmless no-op once the queue is actually empty, and grblHAL
+        // still executes our lines in the order it received them
+        // regardless of when they were written -- unlike silently
+        // stalling the cycle right after a touch with no error reported.
+        if (this.isProbeCycleActive()) {
+          // Only one of these is ever actually counting at a time in
+          // practice (a user wouldn't run two probe cycles at once), but
+          // decrementing both unconditionally is harmless -- Math.max
+          // floors whichever one is already at 0.
+          this.edgeProbeState.pendingAcks = Math.max(0, this.edgeProbeState.pendingAcks - 1);
+          this.cornerProbeState.pendingAcks = Math.max(0, this.cornerProbeState.pendingAcks - 1);
+          this.emit('serialport:read', res.raw);
+          this.feeder.next();
+          return;
+        }
+
         if (this.actionMask.queryParserState.reply) {
           if (this.actionMask.replyParserState) {
             this.actionMask.replyParserState = false;
@@ -799,6 +920,275 @@ class GrblController {
                 log.info('[autolevel] Probing completed');
               }
             }
+
+            // Track probe data if an edge-probe cycle is active. Each point
+            // is probed twice (see queueEdgeProbePoint): a fast touch to
+            // find the edge, then -- after backing off -- a slow touch to
+            // the same target for an accurate, repeatable reading. Only
+            // the 2nd (slow) touch is kept for the line fit; the 1st is
+            // acknowledged to the client (for live feedback / verification)
+            // but otherwise discarded.
+            if (this.edgeProbeState.probePoints.length > 0 && this.edgeProbeState.probedPositions.length < this.edgeProbeState.probePoints.length) {
+              const state = this.edgeProbeState;
+              const pointIndex = state.probedPositions.length;
+
+              state.currentTouches = [...state.currentTouches, { ...probedPos }];
+              const touchIndex = state.currentTouches.length; // 1 = fast, 2 = slow
+
+              log.debug(`[edgeprobe] Point ${pointIndex + 1}/${state.probePoints.length} touch ${touchIndex}/2: posX=${probedPos.x.toFixed(3)}, posY=${probedPos.y.toFixed(3)}, posZ=${probedPos.z.toFixed(3)}`);
+
+              this.emit('edgeprobe:touch', {
+                point: pointIndex,
+                total: state.probePoints.length,
+                touch: touchIndex,
+                touchesPerPoint: 2,
+                pos: { ...probedPos },
+              });
+
+              if (touchIndex < 2) {
+                // Fast touch done -- the queued G-code already backs off
+                // and re-approaches slowly on its own, nothing more to do
+                // here until the slow touch's PRB report arrives.
+                return;
+              }
+
+              // Slow (2nd) touch is the trusted reading. Correct for the
+              // ball-tip stylus radius: the reported position is where the
+              // ball CENTER was at contact, offset from the true surface
+              // by the radius in the direction of travel (probeCompensation
+              // already carries the correct sign -- see edgeprobe:start).
+              const finalTouch = state.currentTouches[1];
+              const compensatedPos = {
+                ...finalTouch,
+                [state.probeAxis]: finalTouch[state.probeAxis] + state.probeCompensation,
+              };
+              const newProbedPositions = [...state.probedPositions, compensatedPos];
+              const isCompleted = newProbedPositions.length >= state.probePoints.length;
+
+              state.probedPositions = newProbedPositions;
+              state.currentTouches = [];
+              // This point is done -- the next point (if any) starts with
+              // a clean retry budget.
+              state.retryAttempt = 0;
+              state.retryExtension = 0;
+
+              this.emit('edgeprobe:update', {
+                current: newProbedPositions.length,
+                total: state.probePoints.length,
+                probedPos: { ...compensatedPos },
+              });
+
+              if (isCompleted) {
+                const { lineAxis, probeAxis } = state;
+                const pairs = newProbedPositions.map((p) => [p[lineAxis], p[probeAxis]]);
+                const fit = edgeprobe.fitLine(pairs);
+
+                state.result = fit;
+
+                this.emit('edgeprobe:complete', {
+                  positions: newProbedPositions,
+                  fit,
+                });
+                log.info('[edgeprobe] Probing completed:', fit);
+
+                // Deliberately NOT resetting edgeProbeState here (tried
+                // that, reverted it): the trailing retract for this final
+                // point is still queued behind the line that just reported
+                // PRB, and isProbeCycleActive() staying true via pendingAcks
+                // is exactly what protects its 'ok's from a stray $G reply
+                // stealing one and stalling the retract mid-flight -- see
+                // isProbeCycleActive()'s own comment. Clearing state early
+                // reopens precisely the race that was fixed earlier tonight,
+                // just at the tail end instead of mid-cycle. probePoints/
+                // probedPositions staying populated after completion is
+                // harmless: edgeprobe:start fully replaces this object on
+                // the next run regardless.
+              } else {
+                const nextIndex = newProbedPositions.length;
+                this.emit('edgeprobe:phase', {
+                  point: nextIndex,
+                  total: state.probePoints.length,
+                  phase: 'moving',
+                });
+                this.queueEdgeProbePoint(nextIndex);
+              }
+            }
+
+            // Corner Probe: two edges, 2+ points each, each point touched
+            // twice (fast find, back off, slow confirm -- same theory as
+            // edgeprobe above). Once all points are in, fit a line through
+            // each edge's contacts (edgeprobe.fitLine), then intersect the
+            // two lines -- doesn't assume a perfect 90° corner.
+            if (this.cornerProbeState.probePoints.length > 0 && this.cornerProbeState.probedPositions.length < this.cornerProbeState.probePoints.length) {
+              const state = this.cornerProbeState;
+              const pointIndex = state.probedPositions.length;
+              const point = state.probePoints[pointIndex];
+
+              state.currentTouches = [...state.currentTouches, { ...probedPos }];
+              const touchIndex = state.currentTouches.length;
+
+              log.debug(`[cornerprobe] Point ${pointIndex + 1}/${state.probePoints.length} (${point.edge}-edge) touch ${touchIndex}/2: posX=${probedPos.x.toFixed(3)}, posY=${probedPos.y.toFixed(3)}, posZ=${probedPos.z.toFixed(3)}`);
+
+              this.emit('cornerprobe:touch', {
+                point: pointIndex,
+                total: state.probePoints.length,
+                touch: touchIndex,
+                touchesPerPoint: 2,
+                pos: { ...probedPos },
+              });
+
+              if (touchIndex < 2) {
+                return;
+              }
+
+              const finalTouch = state.currentTouches[1];
+              const compensatedPos = {
+                ...finalTouch,
+                [point.probeAxis]: finalTouch[point.probeAxis] + point.probeCompensation,
+                edge: point.edge,
+              };
+              const newProbedPositions = [...state.probedPositions, compensatedPos];
+              const isCompleted = newProbedPositions.length >= state.probePoints.length;
+
+              state.probedPositions = newProbedPositions;
+              state.currentTouches = [];
+              // This point is done -- the next point (if any) starts with
+              // a clean retry budget.
+              state.retryAttempt = 0;
+              state.retryExtension = 0;
+
+              this.emit('cornerprobe:update', {
+                current: newProbedPositions.length,
+                total: state.probePoints.length,
+                probedPos: { ...compensatedPos },
+              });
+
+              if (isCompleted) {
+                const tags = state.probePoints;
+                const positions = newProbedPositions;
+
+                const xPairs = positions
+                  .filter((p, i) => tags[i].edge === 'x')
+                  .map((p) => [p.y, p.x]); // independent=y, dependent=x
+                const yPairs = positions
+                  .filter((p, i) => tags[i].edge === 'y')
+                  .map((p) => [p.x, p.y]); // independent=x, dependent=y
+
+                const xLine = edgeprobe.fitLine(xPairs);
+                const yLine = edgeprobe.fitLine(yPairs);
+                const result = probecycles.intersectLines(xLine, yLine);
+
+                state.result = result;
+                this.emit('cornerprobe:complete', {
+                  positions,
+                  xLine,
+                  yLine,
+                  result,
+                });
+                log.info('[cornerprobe] Probing completed:', result);
+
+                // Deliberately NOT resetting cornerProbeState here -- see
+                // the matching comment in the edgeprobe completion branch
+                // above. The trailing retract for this final point is
+                // still queued and needs isProbeCycleActive() (via
+                // pendingAcks) to stay true a little longer to protect it.
+              } else {
+                const nextIndex = newProbedPositions.length;
+                this.emit('cornerprobe:phase', {
+                  point: nextIndex,
+                  total: state.probePoints.length,
+                  phase: 'moving',
+                });
+                this.queueCornerProbePoint(nextIndex);
+              }
+            }
+
+            // Circle Probe (Bore/Boss): fit a circle through the N contact points
+            if (this.trackProbeResult(this.circleProbeState, probedPos, 'circleprobe')) {
+              const result = probecycles.fitCircle(this.circleProbeState.probedPositions);
+
+              this.circleProbeState.result = result;
+              this.emit('circleprobe:complete', {
+                mode: this.circleProbeState.mode,
+                positions: this.circleProbeState.probedPositions,
+                result,
+              });
+              log.info(`[circleprobe:${this.circleProbeState.mode}] Probing completed:`, result);
+            }
+
+            // Rectangle Probe (Pocket/Solid): derive center/width/length
+            // from the 4 wall contacts (order: +X, -X, +Y, -Y)
+            if (this.trackProbeResult(this.rectProbeState, probedPos, 'rectprobe')) {
+              const [plusX, minusX, plusY, minusY] = this.rectProbeState.probedPositions;
+              const result = probecycles.fitRectangle({ plusX, minusX, plusY, minusY });
+
+              this.rectProbeState.result = result;
+              this.emit('rectprobe:complete', {
+                mode: this.rectProbeState.mode,
+                positions: this.rectProbeState.probedPositions,
+                result,
+              });
+              log.info(`[rectprobe:${this.rectProbeState.mode}] Probing completed:`, result);
+            }
+          } else if (this.edgeProbeState.probePoints.length > 0 && this.edgeProbeState.probedPositions.length < this.edgeProbeState.probePoints.length) {
+            // Probe failed to make contact within the configured travel
+            // (G38.2 target reached with no trigger). Without this, the
+            // cycle would hang forever waiting for a PRB report that will
+            // never come -- indistinguishable from the machine actually
+            // being stuck.
+            const state = this.edgeProbeState;
+            const pointIndex = state.probedPositions.length;
+            const touchIndex = state.currentTouches.length + 1;
+
+            const retried = this.retryOrFailProbeTouch(
+              state,
+              'edgeprobe',
+              pointIndex,
+              touchIndex,
+              (idx) => this.queueEdgeProbePoint(idx)
+            );
+            if (!retried) {
+              this.edgeProbeState = {
+                probedPositions: [],
+                probePoints: [],
+                lineAxis: null,
+                probeAxis: null,
+                probeCompensation: 0,
+                currentTouches: [],
+                pendingAcks: 0,
+                retryAttempt: 0,
+                retryExtension: 0,
+                result: null,
+                config: null,
+              };
+            }
+          } else if (this.cornerProbeState.probePoints.length > 0 && this.cornerProbeState.probedPositions.length < this.cornerProbeState.probePoints.length) {
+            // Same as the edgeprobe failure handling above -- a corner
+            // probe touch that never made contact would otherwise hang
+            // the cycle forever with no feedback.
+            const state = this.cornerProbeState;
+            const pointIndex = state.probedPositions.length;
+            const touchIndex = state.currentTouches.length + 1;
+
+            const retried = this.retryOrFailProbeTouch(
+              state,
+              'cornerprobe',
+              pointIndex,
+              touchIndex,
+              (idx) => this.queueCornerProbePoint(idx)
+            );
+            if (!retried) {
+              this.cornerProbeState = {
+                probedPositions: [],
+                probePoints: [],
+                currentTouches: [],
+                pendingAcks: 0,
+                retryAttempt: 0,
+                retryExtension: 0,
+                result: null,
+                config: null,
+              };
+            }
           }
         }
       });
@@ -895,6 +1285,14 @@ class GrblController {
         }
 
         const now = new Date().getTime();
+
+        // Do not query parser state ($G) while a custom probe cycle is
+        // mid-flight -- it's a write independent of the feeder's
+        // send/wait-for-ok sequencing, and can desync it if it lands while
+        // a probe G-code line is in flight (see isProbeCycleActive).
+        if (this.isProbeCycleActive()) {
+          return;
+        }
 
         // Do not force query parser state ($G) when running a G-code program,
         // it will consume 3 bytes from the receive buffer in each time period.
@@ -1098,6 +1496,280 @@ class GrblController {
       this.actionTime.queryParserState = 0;
       this.actionTime.queryStatusReport = 0;
       this.actionTime.senderFinishTime = 0;
+    }
+
+    // True while any custom probe cycle (edge/corner/circle/rect/autolevel)
+    // is mid-flight -- either still waiting on PRB reports (points
+    // remaining), or (edge probe only) still owed 'ok's for G-code already
+    // queued via pendingAcks, which stays true a little longer than the
+    // points comparison alone: the last point's PRB can arrive (completing
+    // probedPositions) before that point's own trailing retract has been
+    // acknowledged, so a plain points-remaining check would let go one
+    // 'ok' too early.
+    //
+    // Used for two things: (1) suppressing the periodic $G parser-state
+    // poll below -- that poll writes directly to the serial port on its
+    // own timer, independent of the feeder's send/wait-for-ok sequencing,
+    // and if it lands while a probe G-code line is in flight its reply can
+    // be consumed as if it were that line's 'ok' (or vice versa); (2) in
+    // the 'ok' handler, routing 'ok's straight to the feeder regardless of
+    // whatever workflow/sender state happens to be lingering from an
+    // unrelated program load elsewhere in the app. Either race silently
+    // desyncs the feeder: the machine goes idle but the next queued line
+    // (e.g. the retract/backoff move right after a touch) is never sent,
+    // with no error reported -- indistinguishable from the machine
+    // actually being stuck.
+    isProbeCycleActive() {
+      const isPending = (state) => (
+        state.probePoints.length > 0 && state.probedPositions.length < state.probePoints.length
+      );
+      return (
+        isPending(this.probeState) ||
+        (this.edgeProbeState.pendingAcks > 0) ||
+        isPending(this.edgeProbeState) ||
+        (this.cornerProbeState.pendingAcks > 0) ||
+        isPending(this.cornerProbeState) ||
+        isPending(this.circleProbeState) ||
+        isPending(this.rectProbeState)
+      );
+    }
+
+    // Shared retry-then-give-up policy for a probe touch that failed to
+    // make contact (G38.2 reached its target with no trigger). Retries
+    // the whole point from scratch (both touches) with the search
+    // distance extended a little further each attempt -- same distance
+    // first (covers a touch that simply missed, e.g. too slow a feed to
+    // reliably trigger a spring-loaded stylus), then +1mm, +2mm, ... up to
+    // MAX_SEARCH_EXTENSION_MM total, then gives up and leaves the machine
+    // alarmed for the operator to inspect, same as before this existed.
+    //
+    // G38.2 failing raises a hard alarm in grblHAL (ALARM:5) that blocks
+    // all further motion until unlocked -- the feeder itself refuses to
+    // send while alarmed and resets its own queue if it tries. So a retry
+    // means: unlock ($X), wait a beat for grblHAL to actually leave the
+    // alarm state, then requeue the point. Real tradeoff: the machine
+    // moves again on its own after every failed touch, without the
+    // operator inspecting it first -- that's the behavior explicitly
+    // asked for here, in exchange for not needing a manual unlock every
+    // time a touch is merely unreliable rather than genuinely missing.
+    //
+    // @return {boolean} true if a retry was queued (caller should leave
+    //   state as-is); false if retries are exhausted (caller should reset)
+    retryOrFailProbeTouch(state, cycleName, pointIndex, touchIndex, queuePoint) {
+      const MAX_SEARCH_EXTENSION_MM = 5;
+      const UNLOCK_SETTLE_MS = 300;
+
+      const nextAttempt = state.retryAttempt + 1;
+      const extension = Math.max(0, nextAttempt - 1);
+
+      if (extension > MAX_SEARCH_EXTENSION_MM) {
+        log.error(`[${cycleName}] Point ${pointIndex + 1} touch ${touchIndex}/2 failed after exhausting retries (searched up to +${MAX_SEARCH_EXTENSION_MM}mm)`);
+        this.emit(`${cycleName}:failed`, {
+          point: pointIndex,
+          total: state.probePoints.length,
+          touch: touchIndex,
+        });
+        return false;
+      }
+
+      log.info(`[${cycleName}] Point ${pointIndex + 1} touch ${touchIndex}/2 missed contact -- retrying (attempt ${nextAttempt}, search +${extension}mm)`);
+      state.retryAttempt = nextAttempt;
+      state.retryExtension = extension;
+      state.currentTouches = [];
+      state.pendingAcks = 0;
+
+      // The failed point's G-code was queued as one batch; whatever came
+      // after the line that failed (backoff, settle, the other touch,
+      // final retract) is still sitting in the feeder's queue, unsent.
+      // Left alone, it would only get flushed lazily the next time the
+      // feeder tries to send while still alarmed -- a timing gap that
+      // could let stale motion from the OLD point leak out once $X
+      // clears the alarm, before the fresh requeue below is in flight.
+      // Clear it explicitly so there's nothing left to leak.
+      this.feeder.reset();
+
+      this.emit(`${cycleName}:retry`, {
+        point: pointIndex,
+        total: state.probePoints.length,
+        touch: touchIndex,
+        attempt: nextAttempt,
+        extension,
+      });
+
+      this.writeln('$X');
+      setTimeout(() => {
+        queuePoint(pointIndex);
+      }, UNLOCK_SETTLE_MS);
+
+      return true;
+    }
+
+    // Queues one edge-probe sample point's 2-touch G-code: rapid to the
+    // approach position, fast touch toward the target, back off, then a
+    // slow touch to the same target for an accurate/repeatable reading,
+    // then a final safety retract. Called once at edgeprobe:start (for
+    // point 0) and again from the PRB handler each time a point's slow
+    // touch completes (for the next point) -- one point's G-code is
+    // queued at a time so the client gets a live 'edgeprobe:phase'/
+    // 'edgeprobe:touch' event at each real transition, instead of the
+    // whole cycle being opaque once streamed.
+    queueEdgeProbePoint(index) {
+      const state = this.edgeProbeState;
+      const point = state.probePoints[index];
+      if (!point) {
+        return;
+      }
+
+      const { probeAxis, lineAxis, config } = state;
+      const AXIS = probeAxis.toUpperCase();
+      const LINE_AXIS = lineAxis.toUpperCase();
+      // retryExtension (0 unless a prior touch on this point missed) pushes
+      // the search further in the same direction as probeDistance -- see
+      // retryOrFailProbeTouch.
+      const probeDistance = config.probeDistance + (Math.sign(config.probeDistance) * state.retryExtension);
+      const target = point[probeAxis] + probeDistance;
+      const backoff = -Math.sign(config.probeDistance) * config.backoffDistance;
+
+      const gcode = [
+        `(Edge Probe: point ${index}, touch 1/2 - fast)`,
+        'G90',
+        // Move one axis at a time, not a single diagonal G0 -- moving both
+        // XY at once can cut straight across a corner if this point's line
+        // coordinate and the previous point's probe-axis coordinate don't
+        // happen to line up (e.g. right after switching from one edge to
+        // another in a corner probe). Line axis first (perpendicular to
+        // the probe direction), probe axis last, so the final approach leg
+        // is always a straight move along the direction about to be probed.
+        `G0 ${LINE_AXIS}${point[lineAxis]}`,
+        `G0 ${AXIS}${point[probeAxis]}`,
+        `G38.2 ${AXIS}${target} F${config.feedrate}`,
+        'G91',
+        `G0 ${AXIS}${backoff}`,
+        'G90',
+        `G4 P${config.settleDelay}`,
+        `(Edge Probe: point ${index}, touch 2/2 - slow)`,
+        `G38.2 ${AXIS}${target} F${config.slowFeedrate}`,
+        'G91',
+        `G0 ${AXIS}${config.retractDistance}`,
+        'G90',
+      ];
+
+      // Every non-comment line will earn exactly one 'ok' from the
+      // controller -- comments are stripped and never transmitted, so
+      // they never generate one (see the feeder's dataFilter).
+      const realLineCount = gcode.filter((line) => !line.trim().startsWith('(')).length;
+      state.pendingAcks += realLineCount;
+
+      this.command('gcode', gcode);
+    }
+
+    // Queues one corner-probe sample point's 2-touch G-code -- same theory
+    // as queueEdgeProbePoint, generalized to a point that already carries
+    // its own probeAxis/target/retractDistance (each edge can run in a
+    // different direction, tagged at cornerprobe:start). backoff reuses
+    // retractDistance's sign (the "away from the surface" direction is
+    // already known from it), scaled down to config.backoffDistance.
+    queueCornerProbePoint(index) {
+      const state = this.cornerProbeState;
+      const point = state.probePoints[index];
+      if (!point) {
+        return;
+      }
+
+      const { config } = state;
+      const { probeAxis } = point;
+      const AXIS = probeAxis.toUpperCase();
+      const lineAxis = (probeAxis === 'x') ? 'y' : 'x';
+      const LINE_AXIS = lineAxis.toUpperCase();
+      const backoff = Math.sign(point.retractDistance) * config.backoffDistance;
+      // retryExtension (0 unless a prior touch on this point missed) pushes
+      // the search further in the same direction as the original probe --
+      // see retryOrFailProbeTouch. point.target already has the base probe
+      // travel baked in, so recover its direction from target vs approach.
+      const probeDirSign = Math.sign(point.target - point[probeAxis]);
+      const target = point.target + (probeDirSign * state.retryExtension);
+
+      // Within an edge, consecutive points share an approach axis close
+      // enough that moving one axis at a time (line axis first, probe axis
+      // last, so the final leg is always a straight move along the probed
+      // direction) is safe without lifting -- it just avoids a diagonal
+      // cut. But the ONE move that crosses from one edge's territory into
+      // the other's (this point's liftBeforeApproach) has no such
+      // guarantee: a same-Z move, single-axis or not, has no idea whether
+      // that path is actually clear of the stock. That transition instead
+      // retracts to a safe Z, travels there (diagonal is fine now, since
+      // it's lifted clear), then plunges back down before probing.
+      const approachGCode = (point.liftBeforeApproach && config.zLift > 0)
+        ? [
+          'G91',
+          `G0 Z${config.zLift}`,
+          'G90',
+          `G0 X${point.x} Y${point.y}`,
+          'G91',
+          `G0 Z${-config.zLift}`,
+          'G90',
+        ]
+        : [
+          `G0 ${LINE_AXIS}${point[lineAxis]}`,
+          `G0 ${AXIS}${point[probeAxis]}`,
+        ];
+
+      const gcode = [
+        `(Corner Probe: ${point.edge}-edge, point ${index}, touch 1/2 - fast)`,
+        'G90',
+        ...approachGCode,
+        `G38.2 ${AXIS}${target} F${config.feedrate}`,
+        'G91',
+        `G0 ${AXIS}${backoff}`,
+        'G90',
+        `G4 P${config.settleDelay}`,
+        `(Corner Probe: ${point.edge}-edge, point ${index}, touch 2/2 - slow)`,
+        `G38.2 ${AXIS}${target} F${config.slowFeedrate}`,
+        'G91',
+        `G0 ${AXIS}${point.retractDistance}`,
+        'G90',
+      ];
+
+      const realLineCount = gcode.filter((line) => !line.trim().startsWith('(')).length;
+      state.pendingAcks += realLineCount;
+
+      this.command('gcode', gcode);
+    }
+
+    // Shared accumulation step for the circle/rect probe cycles (same
+    // theory as autolevel/edgeprobe above, factored out since these two
+    // cycles have no cycle-specific per-point bookkeeping beyond "append
+    // and check completion" -- only the completion math differs, which
+    // stays in each cycle's own PRB handler branch).
+    //
+    // If the point about to be recorded carries its own probeAxis +
+    // probeCompensation (ball-tip stylus radius correction), it's applied
+    // here before the position is stored -- points without it (circle/rect,
+    // not yet implemented) pass through unchanged.
+    // @return {boolean} true once this was the cycle's final point
+    trackProbeResult(state, probedPos, eventName) {
+      if (!(state.probePoints.length > 0 && state.probedPositions.length < state.probePoints.length)) {
+        return false;
+      }
+
+      const point = state.probePoints[state.probedPositions.length];
+      const compensatedPos = (point && point.probeAxis && point.probeCompensation)
+        ? { ...probedPos, [point.probeAxis]: probedPos[point.probeAxis] + point.probeCompensation }
+        : probedPos;
+
+      const newProbedPositions = [...state.probedPositions, compensatedPos];
+      const isCompleted = newProbedPositions.length >= state.probePoints.length;
+      state.probedPositions = newProbedPositions;
+
+      log.debug(`[${eventName}] Probed ${newProbedPositions.length}/${state.probePoints.length}: posX=${compensatedPos.x.toFixed(3)}, posY=${compensatedPos.y.toFixed(3)}, posZ=${compensatedPos.z.toFixed(3)}`);
+
+      this.emit(`${eventName}:update`, {
+        current: newProbedPositions.length,
+        total: state.probePoints.length,
+        probedPos: { ...compensatedPos },
+      });
+
+      return isCompleted;
     }
 
     destroy() {
@@ -1670,6 +2342,7 @@ class GrblController {
           const toolProbeCommand = config.get('tool.toolProbeCommand', 'G38.2');
           const toolProbeDistance = mapValueToUnits(config.get('tool.toolProbeDistance', 1), units);
           const toolProbeFeedrate = mapValueToUnits(config.get('tool.toolProbeFeedrate', 10), units);
+          const toolProbeLength = mapValueToUnits(config.get('tool.toolProbeLength', 0), units);
           const touchPlateHeight = mapValueToUnits(config.get('tool.touchPlateHeight', 0), units);
 
           const context = {
@@ -1682,6 +2355,7 @@ class GrblController {
             'tool_probe_command': toolProbeCommand,
             'tool_probe_distance': toolProbeDistance,
             'tool_probe_feedrate': toolProbeFeedrate,
+            'tool_probe_length': toolProbeLength,
             'touch_plate_height': touchPlateHeight,
 
             // internal functions
@@ -1732,14 +2406,14 @@ class GrblController {
             // Probe the tool
             lines.push('G91 [tool_probe_command] F[tool_probe_feedrate] Z[tool_probe_z - mposz - tool_probe_distance]');
             // Set coordinate system offset
-            lines.push('G10 L20 P[mapWCSToPValue(modal.wcs)] Z[touch_plate_height]');
+            lines.push('G10 L20 P[mapWCSToPValue(modal.wcs)] Z[touch_plate_height + tool_probe_length]');
           } else if (toolChangePolicy === TOOL_CHANGE_POLICY_MANUAL_TOOL_CHANGE_TLO) {
             // Probe the tool
             lines.push('G91 [tool_probe_command] F[tool_probe_feedrate] Z[tool_probe_z - mposz - tool_probe_distance]');
             // Pause for 1 second
             lines.push('%wait 1');
             // Set tool length offset
-            lines.push('G43.1 Z[posz - touch_plate_height]');
+            lines.push('G43.1 Z[posz - touch_plate_height - tool_probe_length]');
           } else if (toolChangePolicy === TOOL_CHANGE_POLICY_MANUAL_TOOL_CHANGE_CUSTOM_PROBING) {
             lines.push(...toolProbeCustomCommands);
           }
@@ -1866,6 +2540,310 @@ class GrblController {
           const [, callback] = args;
           if (typeof callback === 'function') {
             callback(null, { state: this.probeState });
+          }
+        },
+        'edgeprobe:start': () => {
+          const [params = {}] = args;
+          const {
+            lineAxis,
+            probeAxis,
+            start,
+            end,
+            pointCount,
+            probeDistance,
+            feedrate,
+            slowFeedrate,
+            backoffDistance,
+            settleDelay = 0.3,
+            retractDistance,
+            probeRadius = 0,
+          } = params;
+
+          const points = edgeprobe.createEdgeProbePoints({ start, end, count: pointCount });
+
+          // Reset probe state. probeCompensation is added to each reported
+          // contact position along probeAxis to correct for the ball-tip
+          // stylus radius -- the reported position is where the ball
+          // CENTER was at contact, offset from the true surface by exactly
+          // the radius, in the direction of travel (see the PRB handler).
+          this.edgeProbeState = {
+            probedPositions: [],
+            probePoints: points,
+            lineAxis,
+            probeAxis,
+            probeCompensation: probeRadius * Math.sign(probeDistance),
+            currentTouches: [],
+            pendingAcks: 0,
+            retryAttempt: 0,
+            retryExtension: 0,
+            result: null,
+            config: {
+              lineAxis,
+              probeAxis,
+              start,
+              end,
+              pointCount,
+              probeDistance,
+              feedrate,
+              slowFeedrate,
+              backoffDistance,
+              settleDelay,
+              retractDistance,
+              probeRadius,
+            },
+          };
+
+          log.info(`[edgeprobe:start] Start probing with ${points.length} points along ${lineAxis}, probing ${probeAxis} (fast=${feedrate}, slow=${slowFeedrate}, backoff=${backoffDistance}, settle=${settleDelay})`);
+
+          this.emit('edgeprobe:phase', { point: 0, total: points.length, phase: 'moving' });
+          this.queueEdgeProbePoint(0);
+        },
+        'edgeprobe:stop': () => {
+          // Reset the machine to cancel the probe cycle immediately
+          this.command('reset');
+
+          // Clear probe state
+          this.edgeProbeState = {
+            probedPositions: [],
+            probePoints: [],
+            lineAxis: null,
+            probeAxis: null,
+            probeCompensation: 0,
+            currentTouches: [],
+            pendingAcks: 0,
+            retryAttempt: 0,
+            retryExtension: 0,
+            result: null,
+            config: null,
+          };
+          log.info('[edgeprobe:stop] Probe stopped and state cleared');
+        },
+        'edgeprobe:getProbeState': () => {
+          const [, callback] = args;
+          if (typeof callback === 'function') {
+            callback(null, { state: this.edgeProbeState });
+          }
+        },
+        'cornerprobe:start': () => {
+          const [params = {}] = args;
+          const {
+            // Each edge follows the exact same shape as edgeprobe:start's
+            // params: 2+ sample points along the edge, so the corner is
+            // found by intersecting two FITTED LINES rather than assuming
+            // a perfect 90° between two single-point touches.
+            xEdge, // { start: {x,y}, end: {x,y}, pointCount, probeDistance, retractDistance }
+            yEdge, // { start: {x,y}, end: {x,y}, pointCount, probeDistance, retractDistance }
+            feedrate,
+            slowFeedrate,
+            backoffDistance,
+            settleDelay = 0.3,
+            zLift = 0,
+            probeRadius = 0,
+          } = params;
+
+          // xEdge is probed ALONG x (points spaced along y); yEdge is
+          // probed ALONG y (points spaced along x) -- tag each point with
+          // which edge/probeAxis it belongs to so the PRB handler can
+          // split them back apart once all points are in. probeCompensation
+          // corrects for the ball-tip stylus radius per point -- see
+          // edgeprobe:start for the derivation; each edge can have its own
+          // probeDistance sign, so it's computed per edge, not shared.
+          const xPoints = edgeprobe.createEdgeProbePoints({
+            start: xEdge.start, end: xEdge.end, count: xEdge.pointCount,
+          }).map((p) => ({
+            ...p,
+            edge: 'x',
+            probeAxis: 'x',
+            target: p.x + xEdge.probeDistance,
+            retractDistance: xEdge.retractDistance,
+            probeCompensation: probeRadius * Math.sign(xEdge.probeDistance),
+          }));
+          const yPoints = edgeprobe.createEdgeProbePoints({
+            start: yEdge.start, end: yEdge.end, count: yEdge.pointCount,
+          }).map((p, i) => ({
+            ...p,
+            edge: 'y',
+            probeAxis: 'y',
+            target: p.y + yEdge.probeDistance,
+            retractDistance: yEdge.retractDistance,
+            probeCompensation: probeRadius * Math.sign(yEdge.probeDistance),
+            // Only the FIRST Y-edge point needs a Z-lift on approach -- it's
+            // the one point-to-point move that crosses from one edge's
+            // territory into the other's, where a same-Z single-axis move
+            // has no way to know if the path is actually clear. Within an
+            // edge, consecutive points share an approach axis close enough
+            // that axis-by-axis travel (see queueCornerProbePoint) is safe
+            // without lifting.
+            liftBeforeApproach: i === 0,
+          }));
+
+          const points = [...xPoints, ...yPoints];
+
+          this.cornerProbeState = {
+            probedPositions: [],
+            probePoints: points,
+            currentTouches: [],
+            pendingAcks: 0,
+            retryAttempt: 0,
+            retryExtension: 0,
+            result: null,
+            config: { ...params, feedrate, slowFeedrate, backoffDistance, settleDelay, zLift },
+          };
+
+          log.info(`[cornerprobe:start] Start probing ${xPoints.length} X-edge points then ${yPoints.length} Y-edge points (fast=${feedrate}, slow=${slowFeedrate}, backoff=${backoffDistance}, settle=${settleDelay}, zLift=${zLift})`);
+
+          this.emit('cornerprobe:phase', { point: 0, total: points.length, phase: 'moving' });
+          this.queueCornerProbePoint(0);
+        },
+        'cornerprobe:stop': () => {
+          this.command('reset');
+          this.cornerProbeState = {
+            probedPositions: [],
+            probePoints: [],
+            currentTouches: [],
+            pendingAcks: 0,
+            retryAttempt: 0,
+            retryExtension: 0,
+            result: null,
+            config: null,
+          };
+          log.info('[cornerprobe:stop] Probe stopped and state cleared');
+        },
+        'cornerprobe:getProbeState': () => {
+          const [, callback] = args;
+          if (typeof callback === 'function') {
+            callback(null, { state: this.cornerProbeState });
+          }
+        },
+        'circleprobe:start': () => {
+          const [params = {}] = args;
+          const {
+            mode, // 'bore' | 'boss'
+            center,
+            radius,
+            approachRadius,
+            pointCount,
+            feedrate,
+          } = params;
+
+          // Same theory as edgeprobe/cornerprobe: known points computed in
+          // JS, probed one at a time, contacts accumulated via PRB. Bore
+          // starts inside the hole and probes outward; boss starts outside
+          // the post and probes inward -- same math either way, the caller
+          // supplies approachRadius on the correct side of `radius` for
+          // whichever mode this is.
+          const targetPoints = probecycles.createCirclePoints({ center, radius, count: pointCount });
+          const startPoints = probecycles.createCirclePoints({ center, radius: approachRadius, count: pointCount });
+
+          this.circleProbeState = {
+            probedPositions: [],
+            probePoints: targetPoints,
+            mode,
+            result: null,
+            config: { ...params },
+          };
+
+          log.info(`[circleprobe:start] Start ${mode} probing with ${targetPoints.length} points`);
+
+          const probeGCodes = [];
+          targetPoints.forEach((point, index) => {
+            const start = startPoints[index];
+            probeGCodes.push(`(Circle Probe [${mode}]: point ${index})`);
+            probeGCodes.push('G90');
+            probeGCodes.push(`G0 X${start.x} Y${start.y}`);
+            probeGCodes.push(`G38.2 X${point.x} Y${point.y} F${feedrate}`);
+            probeGCodes.push('G90');
+            probeGCodes.push(`G0 X${start.x} Y${start.y}`);
+          });
+
+          this.command('gcode', probeGCodes);
+        },
+        'circleprobe:stop': () => {
+          this.command('reset');
+          this.circleProbeState = {
+            probedPositions: [],
+            probePoints: [],
+            mode: null,
+            result: null,
+            config: null,
+          };
+          log.info('[circleprobe:stop] Probe stopped and state cleared');
+        },
+        'circleprobe:getProbeState': () => {
+          const [, callback] = args;
+          if (typeof callback === 'function') {
+            callback(null, { state: this.circleProbeState });
+          }
+        },
+        'rectprobe:start': () => {
+          const [params = {}] = args;
+          const {
+            mode, // 'pocket' | 'solid'
+            center,
+            width,
+            length,
+            approachClearance,
+            feedrate,
+          } = params;
+
+          const halfW = width / 2;
+          const halfL = length / 2;
+          // Pocket probes outward from inside a cavity; solid probes
+          // inward from outside a block -- same wall math, opposite sign
+          // on where the approach/start point sits relative to the target.
+          const sign = mode === 'pocket' ? 1 : -1;
+
+          const plusXTarget = { x: center.x + (sign * halfW), y: center.y };
+          const minusXTarget = { x: center.x - (sign * halfW), y: center.y };
+          const plusYTarget = { x: center.x, y: center.y + (sign * halfL) };
+          const minusYTarget = { x: center.x, y: center.y - (sign * halfL) };
+
+          const points = [
+            { ...plusXTarget, axis: 'x', wall: 'plusX', start: { x: plusXTarget.x + (sign * approachClearance), y: center.y } },
+            { ...minusXTarget, axis: 'x', wall: 'minusX', start: { x: minusXTarget.x - (sign * approachClearance), y: center.y } },
+            { ...plusYTarget, axis: 'y', wall: 'plusY', start: { x: center.x, y: plusYTarget.y + (sign * approachClearance) } },
+            { ...minusYTarget, axis: 'y', wall: 'minusY', start: { x: center.x, y: minusYTarget.y - (sign * approachClearance) } },
+          ];
+
+          this.rectProbeState = {
+            probedPositions: [],
+            probePoints: points,
+            mode,
+            result: null,
+            config: { ...params },
+          };
+
+          log.info(`[rectprobe:start] Start ${mode} probing (4 walls)`);
+
+          const probeGCodes = [];
+          points.forEach((point) => {
+            const AXIS = point.axis.toUpperCase();
+            const target = point[point.axis];
+            probeGCodes.push(`(Rect Probe [${mode}]: ${point.wall})`);
+            probeGCodes.push('G90');
+            probeGCodes.push(`G0 X${point.start.x} Y${point.start.y}`);
+            probeGCodes.push(`G38.2 ${AXIS}${target} F${feedrate}`);
+            probeGCodes.push('G90');
+            probeGCodes.push(`G0 X${point.start.x} Y${point.start.y}`);
+          });
+
+          this.command('gcode', probeGCodes);
+        },
+        'rectprobe:stop': () => {
+          this.command('reset');
+          this.rectProbeState = {
+            probedPositions: [],
+            probePoints: [],
+            mode: null,
+            result: null,
+            config: null,
+          };
+          log.info('[rectprobe:stop] Probe stopped and state cleared');
+        },
+        'rectprobe:getProbeState': () => {
+          const [, callback] = args;
+          if (typeof callback === 'function') {
+            callback(null, { state: this.rectProbeState });
           }
         },
         'autolevel:loadFromFile': async () => {

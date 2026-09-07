@@ -101,7 +101,7 @@ class WidgetManager extends PureComponent {
       },
       {
         id: 'probe',
-        caption: i18n._('Probe Widget'),
+        caption: i18n._('Zero Probe Widget'),
         details: i18n._('This widget helps you use a touch plate to set your Z zero offset.'),
         visible: true,
         disabled: false
@@ -114,9 +114,23 @@ class WidgetManager extends PureComponent {
         disabled: false
       },
       {
+        id: 'probingCycles',
+        caption: i18n._('Probing Cycles Widget'),
+        details: i18n._('Multi-point edge probing to find and confirm stock skew relative to the machine axes.'),
+        visible: true,
+        disabled: false
+      },
+      {
         id: 'tool',
         caption: i18n._('Tool Widget'),
         details: i18n._('This widget manages workflows for tool changes.'),
+        visible: true,
+        disabled: false
+      },
+      {
+        id: 'toolLibrary',
+        caption: i18n._('Tool Library Widget'),
+        details: i18n._('This widget manages a library of tools (number, diameter, length, and notes).'),
         visible: true,
         disabled: false
       },

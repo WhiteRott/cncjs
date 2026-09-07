@@ -10,11 +10,13 @@ import LaserWidget from 'app/widgets/Laser';
 import MacroWidget from 'app/widgets/Macro';
 import MarlinWidget from 'app/widgets/Marlin';
 import ProbeWidget from 'app/widgets/Probe';
+import ProbingCyclesWidget from 'app/widgets/ProbingCycles';
 import SmoothieWidget from 'app/widgets/Smoothie';
 import SpindleWidget from 'app/widgets/Spindle';
 import CustomWidget from 'app/widgets/Custom';
 import TinyGWidget from 'app/widgets/TinyG';
 import ToolWidget from 'app/widgets/Tool';
+import ToolLibraryWidget from 'app/widgets/ToolLibrary';
 import VisualizerWidget from 'app/widgets/Visualizer';
 import WebcamWidget from 'app/widgets/Webcam';
 
@@ -30,11 +32,13 @@ const getWidgetByName = (name) => {
     'macro': MacroWidget,
     'marlin': MarlinWidget,
     'probe': ProbeWidget,
+    'probingCycles': ProbingCyclesWidget,
     'smoothie': SmoothieWidget,
     'spindle': SpindleWidget,
     'custom': CustomWidget,
     'tinyg': TinyGWidget,
     'tool': ToolWidget,
+    'toolLibrary': ToolLibraryWidget,
     'visualizer': VisualizerWidget,
     'webcam': WebcamWidget
   }[name] || null;

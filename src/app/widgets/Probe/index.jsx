@@ -473,7 +473,7 @@ class ProbeWidget extends PureComponent {
       };
 
       return (
-        <Widget aria-label="Probe widget" fullscreen={isFullscreen}>
+        <Widget aria-label="Zero Probe widget" fullscreen={isFullscreen}>
           <Widget.Header>
             <Widget.Title>
               <Widget.Sortable className={this.props.sortable.handleClassName}>
@@ -482,7 +482,7 @@ class ProbeWidget extends PureComponent {
               </Widget.Sortable>
               {isForkedWidget &&
                 <i aria-hidden="true" className="fa fa-code-fork" style={{ marginRight: 5 }} />}
-              {i18n._('Probe')}
+              {i18n._('Zero Probe')}
             </Widget.Title>
             <Widget.Controls className={this.props.sortable.filterClassName}>
               <Widget.Button

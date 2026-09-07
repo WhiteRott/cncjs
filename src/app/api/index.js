@@ -138,6 +138,86 @@ const setToolConfig = (options) => new Promise((resolve, reject) => {
 });
 
 //
+// Tool Library
+//
+const toolLibrary = {};
+
+toolLibrary.fetch = (options) => new Promise((resolve, reject) => {
+  authrequest
+    .get('/api/tool-library')
+    .query(options)
+    .end((err, res) => {
+      if (err) {
+        reject(res);
+      } else {
+        resolve(res);
+      }
+    });
+});
+
+toolLibrary.create = (options) => new Promise((resolve, reject) => {
+  authrequest
+    .post('/api/tool-library')
+    .send(options)
+    .end((err, res) => {
+      if (err) {
+        reject(res);
+      } else {
+        resolve(res);
+      }
+    });
+});
+
+toolLibrary.read = (id) => new Promise((resolve, reject) => {
+  authrequest
+    .get('/api/tool-library/' + id)
+    .end((err, res) => {
+      if (err) {
+        reject(res);
+      } else {
+        resolve(res);
+      }
+    });
+});
+
+toolLibrary.update = (id, options) => new Promise((resolve, reject) => {
+  authrequest
+    .put('/api/tool-library/' + id)
+    .send(options)
+    .end((err, res) => {
+      if (err) {
+        reject(res);
+      } else {
+        resolve(res);
+      }
+    });
+});
+
+toolLibrary.delete = (id) => new Promise((resolve, reject) => {
+  authrequest
+    .delete('/api/tool-library/' + id)
+    .end((err, res) => {
+      if (err) {
+        reject(res);
+      } else {
+        resolve(res);
+      }
+    });
+});
+
+toolLibrary.activate = (id) => new Promise((resolve, reject) => {
+  authrequest
+    .post('/api/tool-library/' + id + '/activate')
+    .end((err, res) => {
+      if (err) {
+        reject(res);
+      } else {
+        resolve(res);
+      }
+    });
+});
+
+//
 // G-code
 //
 const loadGCode = (options) => new Promise((resolve, reject) => {
@@ -703,6 +783,7 @@ export default {
   // Tool
   getToolConfig,
   setToolConfig,
+  toolLibrary,
 
   // G-code
   loadGCode,

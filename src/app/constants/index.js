@@ -109,3 +109,40 @@ export const TINYG_MACHINE_STATE_JOG = 10; // Machine is in a jogging cycle
 export const TINYG_MACHINE_STATE_INTERLOCK = 11; // Machine is in safety interlock hold
 export const TINYG_MACHINE_STATE_SHUTDOWN = 12; // Machine is in shutdown state. Will not process commands
 export const TINYG_MACHINE_STATE_PANIC = 13; // Machine is in panic state. Needs to be physically reset
+
+// Tool Shape Types
+// Naming follows FreeCAD's CAM workbench tool bit shape taxonomy
+// (src/Mod/CAM/Tools/Shape/shape_aliases.json), for consistent terminology.
+export const TOOL_SHAPE_ENDMILL = 'endmill';
+export const TOOL_SHAPE_BALLEND = 'ballend';
+export const TOOL_SHAPE_BULLNOSE = 'bullnose';
+export const TOOL_SHAPE_CHAMFER = 'chamfer';
+export const TOOL_SHAPE_VBIT = 'vbit';
+export const TOOL_SHAPE_TAPERED_BALLNOSE = 'taperballnose';
+export const TOOL_SHAPE_DRILL = 'drill';
+export const TOOL_SHAPE_REAMER = 'reamer';
+export const TOOL_SHAPE_DOVETAIL = 'dovetail';
+export const TOOL_SHAPE_RADIUS = 'radius';
+export const TOOL_SHAPE_TAP = 'tap';
+export const TOOL_SHAPE_THREAD_MILL = 'threadmill';
+export const TOOL_SHAPE_SLITTING_SAW = 'slittingsaw';
+export const TOOL_SHAPE_PROBE = 'probe';
+export const TOOL_SHAPE_CUSTOM = 'custom';
+
+export const TOOL_SHAPES = [
+  { value: TOOL_SHAPE_ENDMILL, label: 'Endmill' },
+  { value: TOOL_SHAPE_BALLEND, label: 'Ball End' },
+  { value: TOOL_SHAPE_BULLNOSE, label: 'Bullnose' },
+  { value: TOOL_SHAPE_CHAMFER, label: 'Chamfer' },
+  { value: TOOL_SHAPE_VBIT, label: 'V-Bit' },
+  { value: TOOL_SHAPE_TAPERED_BALLNOSE, label: 'Tapered Ball Nose' },
+  { value: TOOL_SHAPE_DRILL, label: 'Drill' },
+  { value: TOOL_SHAPE_REAMER, label: 'Reamer' },
+  { value: TOOL_SHAPE_DOVETAIL, label: 'Dovetail' },
+  { value: TOOL_SHAPE_RADIUS, label: 'Radius' },
+  { value: TOOL_SHAPE_TAP, label: 'Tap' },
+  { value: TOOL_SHAPE_THREAD_MILL, label: 'Thread Mill' },
+  { value: TOOL_SHAPE_SLITTING_SAW, label: 'Slitting Saw' },
+  { value: TOOL_SHAPE_PROBE, label: 'Probe' },
+  { value: TOOL_SHAPE_CUSTOM, label: 'Custom' },
+];

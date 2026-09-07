@@ -19,7 +19,7 @@ class RunProbe extends PureComponent {
       return (
         <Modal disableOverlay size="sm" onClose={actions.closeModal}>
           <Modal.Header>
-            <Modal.Title>{i18n._('Probe')}</Modal.Title>
+            <Modal.Title>{i18n._('Zero Probe')}</Modal.Title>
           </Modal.Header>
           <Modal.Body>
             <div style={{ marginBottom: 10 }}>

@@ -264,6 +264,14 @@ const appMain = () => {
     app.get(urljoin(settings.route, 'api/tool'), api.tool.get);
     app.post(urljoin(settings.route, 'api/tool'), api.tool.set);
 
+    // Tool Library
+    app.get(urljoin(settings.route, 'api/tool-library'), api.toolLibrary.fetch);
+    app.post(urljoin(settings.route, 'api/tool-library'), api.toolLibrary.create);
+    app.get(urljoin(settings.route, 'api/tool-library/:id'), api.toolLibrary.read);
+    app.put(urljoin(settings.route, 'api/tool-library/:id'), api.toolLibrary.update);
+    app.delete(urljoin(settings.route, 'api/tool-library/:id'), api.toolLibrary.__delete);
+    app.post(urljoin(settings.route, 'api/tool-library/:id/activate'), api.toolLibrary.activate);
+
     // G-code
     app.get(urljoin(settings.route, 'api/gcode'), api.gcode.fetch);
     app.post(urljoin(settings.route, 'api/gcode'), api.gcode.upload);
