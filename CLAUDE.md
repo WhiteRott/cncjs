@@ -164,6 +164,46 @@ describes the probe-length piece; needs a rewrite before marking ready for revie
   `NEWOPT:ATC` build flag — nothing in the current machine config blocks any of the three
   planned features.
 
+### Subroutines/macros are NOT available on this firmware — settled, don't re-litigate
+This machine reports `[VER:1.1f.20230129:]` — grblHAL build **2023-01-29**. Every
+subroutine/macro feature postdates it (verified 2026-09-07 against `grblHAL/core`'s
+`changelog.md`):
+
+| Feature | grblHAL build | vs. this machine |
+|---|---|---|
+| `G65` + `M99` macro call/return (experimental) | 20230507 | ~3 months too late |
+| Expressions & flow control — `#vars`, `IF`, `WHILE` (experimental) | 20230529 | ~4 months too late |
+| LinuxCNC-style subroutines (experimental) | 20240526 | ~16 months too late |
+| Named `o-sub`/`o-call` from SD/littlefs | 20241116 | ~22 months too late |
+| `M98` subroutines + `$700` | 20260202 | ~3 years too late |
+
+Two further constraints even on newer firmware: expressions/flow control must be enabled at
+**compile time**, and from build 20230607 the changelog states macros "has to be stored on a
+SD card or in littlefs" — i.e. file-resident, which doesn't fit cncjs's line-streaming sender
+model. This board *does* have SD compiled in (`[NEWOPT:ENUMS,RT+,HOME,ATC,SED,SD,YM]`), so a
+firmware update would make that path viable; the blocker is firmware age, not hardware.
+
+**This is why the probing cycles compute points in JS server-side and stream plain
+`G0`/`G38.2`, reacting to `PRB:` reports** — not an oversight. Note the user's reference doc
+`~/Documents/cnc/Probing cycles` confidently describes all of the above as available; its
+7-cycle taxonomy is sound and drives the roadmap, but its grblHAL subroutine sections do not
+apply here. (An earlier session recorded `M98` as landing in build `20250202`, "~2 years" —
+that was off by a year; it's `20260202`, ~3 years.)
+
+## Reference branches (not part of the feature work)
+- **`smart-pendant`** — branched off `master`, holds `reference/SmartPendant/`: read-only
+  copies of `GrblComm.cpp`/`.h` and `ProbeScr.cpp`/`.h` from
+  [`WhiteRott/SmartPendant`](https://github.com/WhiteRott/SmartPendant) (STM32F411 grblHAL
+  pendant firmware; copyright Devtronic & Nicolai Shlapunov). Nothing here is built or
+  imported by cncjs — it's a cross-reference for grblHAL protocol details (real-time status,
+  `[PRB:]`/`[TLO:]`/`[AXS:]` parameter messages, alarm/state enums) and for its
+  `CenterFinderTab`/`EdgeFinderTab`/`ToolOffsetTab`, the closest existing analogue to this
+  fork's probe cycles and TLO tool-change. Open lead noted in its README: grblHAL reports the
+  *actually applied* tool length offset via `[TLO:...]`, which SmartPendant reads back after
+  every `G43.1`; cncjs parses that message in `GrblLineParserResultParameters.js` but
+  `GrblRunner.js` only re-emits it and never stores it — a close-the-loop opportunity for the
+  per-tool offset work.
+
 ## Working style notes
 - Prefers batched multi-step commands over one-at-a-time once things are stable, but wants
   step-by-step + explicit output pasted back when debugging something that could fail.
