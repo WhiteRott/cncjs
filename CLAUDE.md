@@ -190,6 +190,26 @@ firmware update would make that path viable; the blocker is firmware age, not ha
 apply here. (An earlier session recorded `M98` as landing in build `20250202`, "~2 years" —
 that was off by a year; it's `20260202`, ~3 years.)
 
+## Branch inventory
+`feature/tool-library` is the trunk for this effort (PR #1). Three branches sit on top of it
+with work that is **pushed but NOT yet physically verified on the machine** — per the standing
+rule, controller code that emits G-code doesn't get merged on passing tests alone. Each already
+carries an UNVERIFIED marker in its own in-branch CLAUDE.md.
+
+| Branch | Own commits | Scope | Status |
+|---|---|---|---|
+| `feature/per-tool-z-offsets` | `c3f7fc9f` (+ CLAUDE.md marker) | Extracts `src/server/lib/toolLibrary.js` (`getSanitizedRecords`, `updateToolZOffsetByNumber`, `toRecordFields`) out of `api.toolLibrary.js`, and has `GrblController`'s TLO tool-change persist the probed Z back onto the tool record. Adds `toolLibrary.test.js`. | UNVERIFIED |
+| `fix/probing-cycle-x-to-y-transition` | `60589ec5` (+ marker) | Fixes the corner/edge probe stalling at the last X-edge touch — no retract, no error, widget stuck until Stop. Adds `GrblController.probingCycles.test.js` (189 lines) driving a full cycle through a fake serial harness. | UNVERIFIED |
+| `fix/probe-deflection-labeling` | `ec7acb24` | **Contains the X-to-Y fix** (branched from it, not from trunk). Splits the misnamed `toolProbeMaxDeflection` setting into `toolProbeMaxTravel` + `toolProbeMaxStylusDeflection`, since the check only ever measured travel distance. Touches Tool widget, ProbingCycles, `api.tool.js`, i18n. | UNVERIFIED |
+
+Note the stacking: `fix/probe-deflection-labeling` already includes
+`fix/probing-cycle-x-to-y-transition`, so verifying and merging the former brings the latter
+with it — don't merge both independently. `feature/per-tool-z-offsets` is independent of both.
+
+The corresponding worktrees live under `.claude/worktrees/` (untracked). Note these have no
+`node_modules` of their own, so the `pre-push` lint hook fails there — symlink the main
+checkout's `node_modules` in rather than pushing with `--no-verify`.
+
 ## Reference branches (not part of the feature work)
 - **`smart-pendant`** — branched off `master`, holds `reference/SmartPendant/`: read-only
   copies of `GrblComm.cpp`/`.h` and `ProbeScr.cpp`/`.h` from
