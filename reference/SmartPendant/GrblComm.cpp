@@ -1,0 +1,1952 @@
+//******************************************************************************
+//  @file GrblComm.cpp
+//  @author Nicolai Shlapunov
+//
+//  @details GrblComm: Grbl Communication Class, implementation
+//
+//  @copyright Copyright (c) 2023, Devtronic & Nicolai Shlapunov
+//             All rights reserved.
+//
+//  @section SUPPORT
+//
+//   Devtronic invests time and resources providing this open source code,
+//   please support Devtronic and open-source hardware/software by
+//   donations and/or purchasing products from Devtronic.
+//
+//******************************************************************************
+
+// *****************************************************************************
+// ***   Includes   ************************************************************
+// *****************************************************************************
+#include "GrblComm.h"
+
+#include <cstring>
+#include <cstdlib>
+#include <cstdio>
+
+#if defined(SEND_DATA_TO_USB) // For sending messages to USB
+#include "usb_device.h"
+#include "usbd_cdc.h"
+extern USBD_HandleTypeDef hUsbDeviceFS;
+#endif
+
+// *****************************************************************************
+// ***   Units strings array initialization   **********************************
+// *****************************************************************************
+const char* const GrblComm::units[MEASUREMENT_SYSTEM_CNT] = {"mm", "inch", "deg"};
+const char* const GrblComm::feed_units[MEASUREMENT_SYSTEM_CNT] = {"mm/min", "inches/min", "deg/min"};
+const int32_t GrblComm::scaler[MEASUREMENT_SYSTEM_CNT] = {1000, 10000, 1000}; // 1 um for metric(base unit mm), 1 tenths for imperial(base unit inch), 0.001 degree
+const uint8_t GrblComm::precision[MEASUREMENT_SYSTEM_CNT] = {3u, 4u, 3u}; // 0.000 for metric, 0.0000 for imperial, 0.000 for degrees
+
+// *****************************************************************************
+// ***   Public: Get Instance   ************************************************
+// *****************************************************************************
+GrblComm& GrblComm::GetInstance(void)
+{
+  static GrblComm grbl_comm;
+  return grbl_comm;
+}
+
+// *****************************************************************************
+// ***   Init GrblComm Task   **************************************************
+// *****************************************************************************
+Result GrblComm::InitTask(StHalUart& uart_in)
+{
+  // Save UART handle
+  uart = &uart_in;
+  // Create task
+  return AppTask::InitTask();
+}
+
+// *****************************************************************************
+// ***   Public: GrblComm Setup   **********************************************
+// *****************************************************************************
+Result GrblComm::Setup()
+{
+  // Init UART
+  uart->Init();
+  // Clear all received data to this point
+  uint8_t c = 0u;
+  while(uart->Read(c) == Result::RESULT_OK);
+  // All good
+  return Result::RESULT_OK;
+}
+
+// *****************************************************************************
+// ***   Public: TimerExpired function   ***************************************
+// *****************************************************************************
+Result GrblComm::TimerExpired(uint32_t missed_cnt)
+{
+  // Process any received data
+  PollSerial();
+
+  // If status isn't received within 300 ms - something wrong.
+  if(RtosTick::GetTimeMs() - status_rx_timestamp > 300u)
+  {
+    // Since there no status received, state is Unknown
+    grbl_state = UNKNOWN;
+    // Set status_received to request status again
+    status_received = true;
+  }
+
+  // If we give up control or controller state is unknown, we should clear pending flag
+  if((!IsInControl() || (grbl_state == UNKNOWN)) && respond_pending)
+  {
+    // If we lost control or if controller isn't responding - we don't expect answer anymore
+    respond_pending = false;
+    // Clear send id
+    send_id = next_id;
+    // Set appropriate error code for this situation
+    grbl_status = Status_Comm_Error;
+  }
+
+  // If SW command used to gain control, MPG control requested and MPG isn't in control
+  if(((NVM::GetInstance().GetCtrlTx() == CTRL_SW_COMMAND) || (NVM::GetInstance().GetCtrlTx() == CTRL_PIN_AND_SW_CMD)) && mpg_mode_request && !IsInControl())
+  {
+    // If MPG state received(not in control) or if last status was requested a while ago
+    if(grbl_received.mpg || (RtosTick::GetTimeMs() - status_tx_timestamp > 300u))
+    {
+      // Send command again
+      SendRealTimeCmd(CMD_MPG_MODE_TOGGLE);
+      // Clear status rx timestamp
+      status_tx_timestamp = RtosTick::GetTimeMs();
+      // Status received flag
+      status_received = false;
+      // Clear MPG state receive flag
+      grbl_received.mpg = false;
+    }
+  }
+
+  // If SmarpPendant is in control and request_settings flag is set
+  if(IsInControl() && (request_settings))
+  {
+    // Request controller parameters(like number of axis)
+    RequestControllerParameters();
+    // Request settings from the controller
+    RequestControllerSettings();
+    // And clear the request flag
+    request_settings = false;
+  }
+
+  // Request status if previous one received and more than 100 ms passed since last request
+  if(IsInControl() && status_received && (RtosTick::GetTimeMs() - status_tx_timestamp > 100u) && (uart->IsTxComplete()))
+  {
+    // Save status request timestamp
+    status_tx_timestamp = RtosTick::GetTimeMs();
+    // Status received flag
+    status_received = false;
+    // Copy command to the dedicated transmit byte: Write() is DMA based and
+    // reads memory asynchronously, so transmitting from
+    // status_request_command directly would send the reverted value.
+    status_request_tx_byte = status_request_command;
+    // Request status
+    uart->Write(&status_request_tx_byte, 1u);
+    // Revert status command to short one
+    status_request_command = CMD_STATUS_REPORT_LEGACY;
+
+#if defined(SEND_DATA_TO_USB)
+    // Send to USB
+    if(USBD_CDC_SetTxBuffer(&hUsbDeviceFS, (uint8_t*)"?", 1u) == USBD_OK)
+    {
+      // Send packet - no waiting
+      USBD_CDC_TransmitPacket(&hUsbDeviceFS);
+    }
+#endif
+  }
+
+  // Always Ok
+  return Result::RESULT_OK;
+}
+
+// *****************************************************************************
+// ***   Public: ProcessMessage function   *************************************
+// *****************************************************************************
+Result GrblComm::ProcessMessage()
+{
+  Result result = Result::ERR_BUSY;
+
+  // We can write command only if there no ongoing transmission
+  if(uart->IsTxComplete())
+  {
+    // If ID is zero - it is real time command(i.e. Run, Hold, Stop, etc.),
+    // can be executed regardless who is in control
+    if(rcv_msg.id == 0u)
+    {
+      if((tx_buf[0u] == CMD_STATUS_REPORT_LEGACY) && (status_received == false))
+      {
+        // UpdateStatus() function stuck until status_received become true,
+        // it mean that new status was requested after UpdateStatus() function
+        // called, so discharge request.
+        result = Result::RESULT_OK;
+      }
+      else if(tx_buf[0u] == CMD_STATUS_REPORT_LEGACY)
+      {
+        // Save status request timestamp
+        status_tx_timestamp = RtosTick::GetTimeMs();
+        // Status received flag
+        status_received = false;
+        // Request status
+        result = uart->Write(tx_buf, 1u);
+      }
+      else
+      {
+        // Copy command from message to transmit buffer
+        strncpy((char*)tx_buf, (const char*)rcv_msg.cmd, NumberOf(tx_buf));
+        // Send command
+        result = uart->Write(tx_buf, strlen((char*)tx_buf));
+      }
+
+#if defined(SEND_DATA_TO_USB)
+      // Send to USB
+      if(USBD_CDC_SetTxBuffer(&hUsbDeviceFS, tx_buf, strlen((char*)tx_buf)) == USBD_OK)
+      {
+        // Send packet - no waiting
+        USBD_CDC_TransmitPacket(&hUsbDeviceFS);
+      }
+#endif
+    }
+    else if(IsInControl() && !respond_pending)
+    {
+      // If previous command successful
+      if(grbl_status == Status_OK)
+      {
+        // Lock mutex before parsing data
+        mutex.Lock();
+        // Save cmd TX timestamp
+        cmd_tx_timestamp = RtosTick::GetTimeMs();
+        // Set pending flag
+        respond_pending = true;
+        // Set ID
+        send_id = rcv_msg.id;
+        // Release mutex after parsing data
+        mutex.Release();
+        // Copy command from message to transmit buffer
+        strncpy((char*)tx_buf, (const char*)rcv_msg.cmd, NumberOf(tx_buf));
+        // Send command
+        result = uart->Write(tx_buf, strlen((char*)tx_buf));
+
+#if defined(SEND_DATA_TO_USB)
+        // Send to USB
+        if(USBD_CDC_SetTxBuffer(&hUsbDeviceFS, tx_buf, strlen((char*)tx_buf)) == USBD_OK)
+        {
+          // Send packet - no waiting
+          USBD_CDC_TransmitPacket(&hUsbDeviceFS);
+        }
+#endif
+      }
+      else
+      {
+        // Set ID
+        send_id = rcv_msg.id;
+        // Result ok, but not really
+        result = Result::RESULT_OK;
+      }
+    }
+    else
+    {
+      ; // Do nothing - MISRA rule
+    }
+  }
+
+  // If message can't be processed right now
+  if((result == Result::ERR_BUSY) || (result == Result::ERR_UART_BUSY))
+  {
+    // And if it is real time message or we have control
+    if((rcv_msg.id == 0u) || IsInControl())
+    {
+      // Resend it to itself as priority since order is important
+      result = SendTaskMessage(&rcv_msg, true);
+      // And delay a little bit to allow other task to work
+      RtosTick::DelayMs(TASK_TIMER_PERIOD_MS);
+    }
+    else // If it is not an real time command and we not in control - discard it
+    {
+      // Set ID
+      send_id = rcv_msg.id;
+      // Result ok, but not really
+      result = Result::RESULT_OK;
+    }
+  }
+  else
+  {
+    // We can't send anything if MPG mode is off, so ignore it
+    result = Result::RESULT_OK;
+  }
+
+  return result;
+}
+
+// *****************************************************************************
+// ***   Public: GainControl function   ****************************************
+// *****************************************************************************
+void GrblComm::GainControl()
+{
+  if(NVM::GetInstance().GetCtrlTx() == CTRL_GPIO_PIN)
+  {
+    // Open drain
+    HAL_GPIO_WritePin(MPG_EN_GPIO_Port, MPG_EN_Pin, GPIO_PIN_RESET);
+  }
+  else if(NVM::GetInstance().GetCtrlTx() == CTRL_SW_COMMAND)
+  {
+    // Send toggle command only if control wasn't requested before
+    if(!mpg_mode_request)
+    {
+      SendRealTimeCmd(CMD_MPG_MODE_TOGGLE);
+      // Set timestamp when status was requested to track if we will get status
+      // in response to CMD_MPG_MODE_TOGGLE command
+      status_tx_timestamp = RtosTick::GetTimeMs();
+      // Status received flag
+      status_received = false;
+    }
+  }
+  else if(NVM::GetInstance().GetCtrlTx() == CTRL_PIN_AND_SW_CMD)
+  {
+    // Open drain
+    HAL_GPIO_WritePin(MPG_EN_GPIO_Port, MPG_EN_Pin, GPIO_PIN_RESET);
+    // Send toggle command only if control wasn't requested before
+    if(!mpg_mode_request)
+    {
+      SendRealTimeCmd(CMD_MPG_MODE_TOGGLE);
+      // Set timestamp when status was requested to track if we will get status
+      // in response to CMD_MPG_MODE_TOGGLE command
+      status_tx_timestamp = RtosTick::GetTimeMs();
+      // Status received flag
+      status_received = false;
+    }
+  }
+  else
+  {
+    ; // Do nothing - MISRA rule
+  }
+  // Clear MPG state receive flag
+  grbl_received.mpg = false;
+  // Set flag to indicate we want to gain control
+  mpg_mode_request = true;
+  // Request full status report first time after connect
+  status_request_command = CMD_STATUS_REPORT_ALL;
+}
+
+// *****************************************************************************
+// ***   Public: ReleaseControl function   *************************************
+// *****************************************************************************
+void GrblComm::ReleaseControl()
+{
+  if(NVM::GetInstance().GetCtrlTx() == CTRL_GPIO_PIN)
+  {
+    // Close drain
+    HAL_GPIO_WritePin(MPG_EN_GPIO_Port, MPG_EN_Pin, GPIO_PIN_SET);
+    // Set flag to indicate we want to give up control
+    mpg_mode_request = false;
+  }
+  else if(NVM::GetInstance().GetCtrlTx() == CTRL_SW_COMMAND)
+  {
+    // Send toggle command only if control requested before and was granted
+    if(mpg_mode_request && GetMpgMode())
+    {
+      SendRealTimeCmd(CMD_MPG_MODE_TOGGLE);
+    }
+    // Set flag to indicate we want to give up control
+    mpg_mode_request = false;
+  }
+  else if(NVM::GetInstance().GetCtrlTx() == CTRL_PIN_AND_SW_CMD)
+  {
+    // Close drain
+    HAL_GPIO_WritePin(MPG_EN_GPIO_Port, MPG_EN_Pin, GPIO_PIN_SET);
+    // Send toggle command only if control requested before and was granted
+    if(mpg_mode_request && GetMpgMode())
+    {
+      SendRealTimeCmd(CMD_MPG_MODE_TOGGLE);
+    }
+    // Set flag to indicate we want to give up control
+    mpg_mode_request = false;
+  }
+  else if(NVM::GetInstance().GetCtrlTx() == CTRL_FULL)
+  {
+    // Never release control if Pendant in full control mode
+  }
+  else
+  {
+    ; // Should never get there
+  }
+
+  if(mpg_mode_request == false)
+  {
+    // Clear an error
+    respond_pending = false;
+    send_id = next_id;
+    grbl_status = Status_OK;
+    // Clear MPG state receive flag
+    grbl_received.mpg = false;
+  }
+}
+
+// *****************************************************************************
+// ***   Public: GetAxisName function   ****************************************
+// *****************************************************************************
+const char* const GrblComm::GetAxisName(uint8_t axis)
+{
+  // Prevent out of boundaries
+  if(axis >= number_of_axis) axis = AXIS_CNT;
+  // Return result
+  return axis_str[axis];
+}
+
+// *****************************************************************************
+// ***   Public: IsRotaryAxis function   ***************************************
+// *****************************************************************************
+bool GrblComm::IsRotaryAxis(uint8_t axis)
+{
+  bool result = false;
+
+  // First 3 axis(XYZ) can't be rotary
+  if((axis >= AXIS_A) && (axis < number_of_axis))
+  {
+    axis -= AXIS_A;
+    result = (rotary_axis_mask & (1u << axis));
+  }
+
+  // Return result
+  return result;
+}
+
+// *****************************************************************************
+// ***   Public: GetStateName function   ***************************************
+// *****************************************************************************
+const char* const GrblComm::GetStateName(state_t state)
+{
+  // Prevent out of boundaries
+  if(state >= STATE_CNT)
+  {
+    state = UNKNOWN;
+  }
+  // Return result
+  return grbl_state_str[state];
+}
+
+// *****************************************************************************
+// ***   Public: GetStatusName function   **************************************
+// *****************************************************************************
+const char* const GrblComm::GetStatusName(status_t status)
+{
+  // Prevent out of boundaries
+  if(status >= Status_Status_Cnt)
+  {
+    status = Status_Status_Cnt;
+  }
+  // Return result
+  return grbl_status_str[status];
+}
+
+// *****************************************************************************
+// ***   Public: GetAxisMachinePosition function   *****************************
+// *****************************************************************************
+int32_t GrblComm::GetAxisMachinePosition(uint8_t axis)
+{
+  // Return value - zero by default. Non existent axis always 0.
+  int32_t value = 0;
+  // Check parameter
+  if(axis < number_of_axis)
+  {
+    // Lock mutex before copying data
+    mutex.Lock();
+    // Check if report in work coordinates
+    if(grbl_useWPos)
+    {
+      // If report in work coordinates, we have to add offset to get machine coordinates
+      value = (int32_t)((grbl_position[axis] + grbl_offset[axis]) * GetReportUnitsScaler(axis));
+    }
+    else
+    {
+      // Convert it into fixed point(um for metric/tenths for imperial)
+      value = (int32_t)(grbl_position[axis] * GetReportUnitsScaler(axis));
+    }
+    // Release mutex after data is copied
+    mutex.Release();
+  }
+  // Return result
+  return value;
+}
+
+// *****************************************************************************
+// ***   Public: GetAxisPosition function   ************************************
+// *****************************************************************************
+int32_t GrblComm::GetAxisPosition(uint8_t axis)
+{
+  // Return value - zero by default. Non existent axis always 0.
+  int32_t value = 0;
+  // Check parameter
+  if(axis < number_of_axis)
+  {
+    // Lock mutex before copying data
+    mutex.Lock();
+    // Check if report in work coordinates
+    if(grbl_useWPos)
+    {
+      // Convert it into fixed point(um for metric/tenths for imperial)
+      value = (int32_t)(grbl_position[axis] * GetReportUnitsScaler(axis));
+    }
+    else
+    {
+      // If report in machine coordinates, we have to subtract offset to get work coordinates
+      value = (int32_t)((grbl_position[axis] - grbl_offset[axis]) * GetReportUnitsScaler(axis));
+    }
+    // Release mutex after data is copied
+    mutex.Release();
+  }
+  // Return result
+  return value;
+}
+
+// *****************************************************************************
+// ***   Public: GetProbeMachinePosition function   ****************************
+// *****************************************************************************
+int32_t GrblComm::GetProbeMachinePosition(uint8_t axis)
+{
+  // Return value - zero by default. Non existent axis always 0.
+  int32_t value = 0;
+  // Check parameter
+  if(axis < number_of_axis)
+  {
+    // Lock mutex before copying data
+    mutex.Lock();
+    // Probe position is always reported by the controller in machine
+    // coordinates(see report_probe_parameters() in grblHAL core report.c:
+    // "Report in terms of machine position"), regardless of WPos/MPos
+    // status report setting - use it as is.
+    value = (int32_t)(grbl_probe_position[axis] * GetReportUnitsScaler(axis));
+    // Release mutex after data is copied
+    mutex.Release();
+  }
+  // Return result
+  return value;
+}
+
+// *****************************************************************************
+// ***   Public: GetProbePosition function   ***********************************
+// *****************************************************************************
+int32_t GrblComm::GetProbePosition(uint8_t axis)
+{
+  // Return value - zero by default. Non existent axis always 0.
+  int32_t value = 0;
+  // Check parameter
+  if(axis < number_of_axis)
+  {
+    // Lock mutex before copying data
+    mutex.Lock();
+    // Probe position is always reported by the controller in machine
+    // coordinates regardless of WPos/MPos status report setting, so to get
+    // work position offset always have to be subtracted.
+    value = (int32_t)((grbl_probe_position[axis] - grbl_offset[axis]) * GetReportUnitsScaler(axis));
+    // Release mutex after data is copied
+    mutex.Release();
+  }
+  // Return result
+  return value;
+}
+
+// *****************************************************************************
+// ***   Public: GetAxisMaxFeedX100   ******************************************
+// *****************************************************************************
+uint32_t GrblComm::GetAxisMaxFeedX100(uint8_t axis)
+{
+  uint32_t rate = 0u;
+
+  if(axis < AXIS_CNT)
+  {
+    rate = (uint32_t)(axis_max_feed[axis] * 100.0f);
+    // Controller settings are always metric, so for imperial reports value
+    // have to be converted. Rotary axes are degrees in both systems.
+    if(!IsRotaryAxis(axis) && !IsMetric()) rate = rate * 10u / 254u;
+  }
+
+  // Return value multiplied by 100 to match feed_x100 format
+  return rate;
+}
+
+
+// *****************************************************************************
+// ***   Public: GetCmdResult   ************************************************
+// *****************************************************************************
+GrblComm::status_t GrblComm::GetCmdResult(uint32_t id)
+{
+  status_t status = Status_Cmd_Not_Executed_Yet;
+
+  // If respond received and last send ID match requested
+  if((respond_pending == false) && (id == send_id))
+  {
+    // Use current status
+    status = grbl_status;
+  }
+  else
+  {
+    // If requested ID less than we already sent - status is lost
+    if(id < send_id)
+    {
+      status = Status_Next_Cmd_Executed;
+    }
+  }
+
+  return status;
+}
+
+// *****************************************************************************
+// ***   Public: IsStatusReceivedAfterCmd   ************************************
+// *****************************************************************************
+bool GrblComm::IsStatusReceivedAfterCmd(uint32_t id)
+{
+  bool result = false;
+
+  // If requested command executed and respond received
+  if(GetCmdResult(id) == Status_OK)
+  {
+    // And respond rx timestamp less than last status rx timestamp
+    if(cmd_rx_timestamp < status_rx_timestamp)
+    {
+      result = true;
+    }
+  }
+  else if(GetCmdResult(id) == Status_Next_Cmd_Executed)
+  {
+    // If next cmd is executed, we can check cmd tx timestamp and status rx timestamp
+    if(cmd_tx_timestamp < status_rx_timestamp)
+    {
+      result = true;
+    }
+  }
+  else
+  {
+    ; // Do nothing
+  }
+
+  return result;
+}
+
+// *****************************************************************************
+// ***   Public: SendCmd   *****************************************************
+// *****************************************************************************
+Result GrblComm::SendCmd(const char* cmd, uint32_t &id)
+{
+  Result result = Result::ERR_CANNOT_EXECUTE;
+
+  // We able to send command only if we in control and in known state
+  if(IsInControl() && (grbl_state != UNKNOWN))
+  {
+    TaskQueueMsg msg;
+
+    // Set ID for command
+    msg.id = GetNextId();
+    // Cycle to copy command
+    for(uint32_t i = 0u; i < NumberOf(msg.cmd); i++)
+    {
+      // Copy one byte
+      msg.cmd[i] = cmd[i];
+      // Check if it is null-terminator
+      if(msg.cmd[i] == '\0')
+      {
+        // Set good result
+        result = Result::RESULT_OK;
+        // And break the cycle
+        break;
+      }
+    }
+
+    // If we able to copy command
+    if(result.IsGood())
+    {
+      // Send the message
+      result = SendTaskMessage(&msg);
+      // Save ID
+      id = msg.id;
+    }
+  }
+
+  // Return result
+  return result;
+}
+
+// *****************************************************************************
+// ***   Public: SendRealTimeCmd   *********************************************
+// *****************************************************************************
+Result GrblComm::SendRealTimeCmd(uint8_t cmd)
+{
+  // Real time commands can be send any time
+  TaskQueueMsg msg;
+  // Set ID to 0 - real time command
+  msg.id = 0u;
+  // Set real time command and null-terminator
+  msg.cmd[0] = cmd;
+  msg.cmd[1] = '\0';
+
+  // Send the message as priority since it is real-time command
+  return SendTaskMessage(&msg, true);
+}
+
+// *****************************************************************************
+// ***   Public: UpdateStatus function   ***************************************
+// *****************************************************************************
+void GrblComm::UpdateStatus()
+{
+  // Timestamp to limit waiting time: controller may stop responding and this
+  // function must not hang the calling task forever.
+  uint32_t start_ms = RtosTick::GetTimeMs();
+
+  // If we already requested status, we have to wait until it received before request another one
+  while((status_received == false) && (RtosTick::GetTimeMs() - start_ms < 500u))
+  {
+    RtosTick::DelayMs(1u);
+  }
+
+  // Save status request timestamp
+  uint32_t prev_status_rx_timestamp = status_rx_timestamp;
+  // Send status report request
+  SendRealTimeCmd(CMD_STATUS_REPORT_LEGACY);
+  // Wait until report request received or timeout expired
+  while((prev_status_rx_timestamp == status_rx_timestamp) && (RtosTick::GetTimeMs() - start_ms < 1000u))
+  {
+    RtosTick::DelayMs(1u);
+  }
+}
+
+// *****************************************************************************
+// ***   Public: Jog   *********************************************************
+// *****************************************************************************
+Result GrblComm::Jog(uint8_t axis, int32_t distance, uint32_t feed_x100, bool is_absolute)
+{
+  Result result = Result::ERR_BAD_PARAMETER;
+
+  if(axis < number_of_axis)
+  {
+    // Jogging possible only in Idle or Jog states
+    if(IsInControl() && ((grbl_state == IDLE) || (grbl_state == JOG)))
+    {
+      TaskQueueMsg msg;
+
+      // Set ID for command
+      msg.id = GetNextId();
+
+      // Clamp feed to the axis maximum rate($110 + axis) if it is known
+      uint32_t max_feed_x100 = GetAxisMaxFeedX100(axis);
+      if((max_feed_x100 != 0u) && (feed_x100 > max_feed_x100)) feed_x100 = max_feed_x100;
+
+      // Buffers for distance and feed strings
+      char distance_str[16u];
+      char feed_str[16u];
+      // Convert distance & feed values to strings
+      ValueToString(distance_str, NumberOf(distance_str), distance, GetReportUnitsScaler(axis));
+      ValueToString(feed_str, NumberOf(feed_str), feed_x100, 100);
+      // Create jog string
+      snprintf((char*)msg.cmd, NumberOf(msg.cmd), "$J=%s%s%s%sF%s\r", GetMeasurementSystemGcode(), is_absolute ? "G90" : "G91", axis_str[axis], distance_str, feed_str);
+
+      // Send message
+      result = SendTaskMessage(&msg);
+    }
+    else
+    {
+      result = Result::ERR_CANNOT_EXECUTE;
+    }
+  }
+
+  // Return result
+  return result;
+}
+
+// *****************************************************************************
+// ***   Public: JogInMachineCoodinates   **************************************
+// *****************************************************************************
+Result GrblComm::JogInMachineCoodinates(uint8_t axis, int32_t distance, uint32_t feed_x100)
+{
+  Result result = Result::ERR_BAD_PARAMETER;
+
+  if(axis < number_of_axis)
+  {
+    // Jogging possible only in Idle or Jog states
+    if(IsInControl() && ((grbl_state == IDLE) || (grbl_state == JOG)))
+    {
+      TaskQueueMsg msg;
+
+      // Set ID for command
+      msg.id = GetNextId();
+
+      // Buffers for distance and feed strings
+      char distance_str[16u];
+      char feed_str[16u];
+      // Convert distance & feed values to strings. Feed passed as value * 100
+      // to keep resolution for slow feeds in inches/min(imperial system).
+      ValueToString(distance_str, NumberOf(distance_str), distance, GetReportUnitsScaler(axis));
+      ValueToString(feed_str, NumberOf(feed_str), feed_x100, 100);
+      // Create jog string
+      snprintf((char*)msg.cmd, NumberOf(msg.cmd), "$J=%sG53G90%s%sF%s\r", GetMeasurementSystemGcode(), axis_str[axis], distance_str, feed_str);
+
+      // Send message
+      result = SendTaskMessage(&msg);
+    }
+    else
+    {
+      result = Result::ERR_CANNOT_EXECUTE;
+    }
+  }
+
+  // Return result
+  return result;
+}
+
+// *****************************************************************************
+// ***   Public: JogMultiple   *************************************************
+// *****************************************************************************
+Result GrblComm::JogMultiple(int32_t distance_x, int32_t distance_y, int32_t distance_z, uint32_t feed_x100, bool is_absolute)
+{
+  Result result = Result::RESULT_OK;
+
+  // Jogging possible only in Idle or Jog states
+  if(IsInControl() && ((grbl_state == IDLE) || (grbl_state == JOG)))
+  {
+    TaskQueueMsg msg;
+
+    // Set ID for command
+    msg.id = GetNextId();
+
+    // Buffer for distance string
+    char distance_x_str[16u];
+    char distance_y_str[16u];
+    char distance_z_str[16u];
+    char feed_str[16u];
+    // Convert distance value to string
+    ValueToString(distance_x_str, NumberOf(distance_x_str), distance_x, GetReportUnitsScaler());
+    ValueToString(distance_y_str, NumberOf(distance_y_str), distance_y, GetReportUnitsScaler());
+    ValueToString(distance_z_str, NumberOf(distance_z_str), distance_z, GetReportUnitsScaler());
+    ValueToString(feed_str, NumberOf(feed_str), feed_x100, 100);
+    // Create jog string. Axis words added only for axes the controller
+    // reports: axis names come from the AXS report and slots beyond
+    // number_of_axis contain default names, which would produce a
+    // duplicated axis word on controllers with less than 3 axes.
+    int32_t len = snprintf((char*)msg.cmd, NumberOf(msg.cmd), "$J=%s%s", GetMeasurementSystemGcode(), is_absolute ? "G90" : "G91");
+    // X axis word
+    if(AXIS_X < number_of_axis) len += snprintf((char*)msg.cmd + len, NumberOf(msg.cmd) - len, "%s%s", axis_str[AXIS_X], distance_x_str);
+    // Y axis word
+    if(AXIS_Y < number_of_axis) len += snprintf((char*)msg.cmd + len, NumberOf(msg.cmd) - len, "%s%s", axis_str[AXIS_Y], distance_y_str);
+    // Z axis word
+    if(AXIS_Z < number_of_axis) len += snprintf((char*)msg.cmd + len, NumberOf(msg.cmd) - len, "%s%s", axis_str[AXIS_Z], distance_z_str);
+    // Feed word
+    snprintf((char*)msg.cmd + len, NumberOf(msg.cmd) - len, "F%s\r", feed_str);
+
+    // Send message
+    result = SendTaskMessage(&msg);
+  }
+  else
+  {
+    result = Result::ERR_CANNOT_EXECUTE;
+  }
+
+  // Return result
+  return result;
+}
+
+// *****************************************************************************
+// ***   Public: JogArcXYR   ***************************************************
+// *****************************************************************************
+Result GrblComm::JogArcXYR(int32_t x, int32_t y, uint32_t r, uint32_t feed_x100, bool direction, bool is_absolute)
+{
+  Result result = Result::RESULT_OK;
+
+  // Jogging possible only in Idle or Jog states
+  if(IsInControl() && ((grbl_state == IDLE) || (grbl_state == JOG) || (grbl_state == RUN)))
+  {
+    TaskQueueMsg msg;
+
+    // Set ID for command
+    msg.id = GetNextId();
+
+    // Buffers for distance and feed strings
+    char x_str[16u];
+    char y_str[16u];
+    char r_str[16u];
+    char feed_str[16u];
+    // Convert distance & feed values to strings
+    ValueToString(x_str, NumberOf(x_str), x, GetReportUnitsScaler());
+    ValueToString(y_str, NumberOf(y_str), y, GetReportUnitsScaler());
+    ValueToString(r_str, NumberOf(r_str), r, GetReportUnitsScaler());
+    ValueToString(feed_str, NumberOf(feed_str), feed_x100, 100);
+
+    // Create Jog command
+    snprintf((char*)msg.cmd, NumberOf(msg.cmd), "%sG17%s%s%s%s%s%sR%sF%s\r", GetMeasurementSystemGcode(),
+                                                is_absolute ? "G90" : "G91", direction ? "G02" : "G03",
+                                                axis_str[AXIS_X], x_str, axis_str[AXIS_Y], y_str, r_str, feed_str);
+
+    // Send message
+    result = SendTaskMessage(&msg);
+  }
+  else
+  {
+    result = Result::ERR_CANNOT_EXECUTE;
+  }
+
+  // Return result
+  return result;
+}
+
+// *****************************************************************************
+// ***   Public: ZeroAxis   ****************************************************
+// *****************************************************************************
+Result GrblComm::ZeroAxis(uint8_t axis)
+{
+  Result result = Result::ERR_BAD_PARAMETER;
+
+  if(axis < number_of_axis)
+  {
+    // Reset axis possible only in Idle state
+    if(IsInControl() && (grbl_state == IDLE))
+    {
+      TaskQueueMsg msg;
+
+      // Set ID for command
+      msg.id = GetNextId();
+      // Create Zero Axis command
+      snprintf((char*)msg.cmd, NumberOf(msg.cmd), "G90G10L20P0%s0\r", axis_str[axis]); // G90G10L20P0X0
+
+      // Send message
+      result = SendTaskMessage(&msg);
+    }
+    else
+    {
+      result = Result::ERR_CANNOT_EXECUTE;
+    }
+  }
+
+  // Return result
+  return result;
+}
+
+// *****************************************************************************
+// ***   Public: SetAxisPosition   *********************************************
+// *****************************************************************************
+Result GrblComm::SetAxisPosition(uint8_t axis, int32_t position)
+{
+  Result result = Result::ERR_BAD_PARAMETER;
+
+  if(axis < number_of_axis)
+  {
+    // Reset axis possible only in Idle state
+    if(IsInControl() && (grbl_state == IDLE))
+    {
+      TaskQueueMsg msg;
+
+      // Set ID for command
+      msg.id = GetNextId();
+
+      // Buffer for distance string
+      char position_str[16u];
+      // Convert distance value to string
+      ValueToString(position_str, NumberOf(position_str), position, GetReportUnitsScaler(axis));
+      // Create Set Axis command
+      snprintf((char*)msg.cmd, NumberOf(msg.cmd), "%sG90G10L20P0%s%s\r", GetMeasurementSystemGcode(), axis_str[axis], position_str);
+
+      // Send message
+      result = SendTaskMessage(&msg);
+    }
+    else
+    {
+      result = Result::ERR_CANNOT_EXECUTE;
+    }
+  }
+
+  // Return result
+  return result;
+}
+
+// *****************************************************************************
+// ***   Public: MoveAxis   ****************************************************
+// *****************************************************************************
+Result GrblComm::MoveAxis(uint8_t axis, int32_t distance, uint32_t feed_x100, uint32_t &id, bool is_absolute)
+{
+  Result result = Result::ERR_BAD_PARAMETER;
+
+  if(axis < number_of_axis)
+  {
+    // Move possible only in Idle state
+    if(IsInControl() && (grbl_state == IDLE))
+    {
+      TaskQueueMsg msg;
+
+      // Set ID for command
+      msg.id = GetNextId();
+
+      // Buffers for distance and feed strings
+      char distance_str[16u];
+      char feed_str[16u];
+      // Convert distance & feed values to strings
+      ValueToString(distance_str, NumberOf(distance_str), distance, GetReportUnitsScaler(axis));
+      ValueToString(feed_str, NumberOf(feed_str), feed_x100, 100);
+
+      // Create move command(zero feed mean rapid)
+      if(feed_x100)
+      {
+        snprintf((char*)msg.cmd, NumberOf(msg.cmd), "%s%sG1%s%sF%s\r", is_absolute ? "G90" : "G91", GetMeasurementSystemGcode(), axis_str[axis], distance_str, feed_str);
+      }
+      else
+      {
+        snprintf((char*)msg.cmd, NumberOf(msg.cmd), "%s%sG0%s%s\r", is_absolute ? "G90" : "G91", GetMeasurementSystemGcode(), axis_str[axis], distance_str);
+      }
+
+      // Send message
+      result = SendTaskMessage(&msg);
+      // Save ID
+      id = msg.id;
+    }
+    else
+    {
+      result = Result::ERR_CANNOT_EXECUTE;
+    }
+  }
+
+  // Return result
+  return result;
+}
+
+// *****************************************************************************
+// ***   Public: ProbeAxisTowardWorkpiece   ************************************
+// *****************************************************************************
+Result GrblComm::ProbeAxisTowardWorkpiece(uint8_t axis, int32_t position, uint32_t feed_x100, uint32_t &id, bool strict)
+{
+  Result result = Result::ERR_BAD_PARAMETER;
+
+  if(axis < number_of_axis)
+  {
+    // Reset axis possible only in Idle state
+    if(IsInControl() && (grbl_state == IDLE))
+    {
+      TaskQueueMsg msg;
+
+      // Set ID for command
+      msg.id = GetNextId();
+
+      // Buffers for distance and feed strings
+      char position_str[16u];
+      char feed_str[16u];
+      // Convert distance & feed values to strings. Feed passed as value * 100
+      // to keep resolution for slow feeds in inches/min(imperial system).
+      ValueToString(position_str, NumberOf(position_str), position, GetReportUnitsScaler(axis));
+      ValueToString(feed_str, NumberOf(feed_str), feed_x100, 100);
+      // Create Set Axis command. Strict uses .2 to produce alarm, non-strict uses .3 to avoid alarm.
+      if(strict)
+      {
+        snprintf((char*)msg.cmd, NumberOf(msg.cmd), "G90%sG38.2%s%sF%s\r", GetMeasurementSystemGcode(), axis_str[axis], position_str, feed_str);
+      }
+      else
+      {
+        snprintf((char*)msg.cmd, NumberOf(msg.cmd), "G90%sG38.3%s%sF%s\r", GetMeasurementSystemGcode(), axis_str[axis], position_str, feed_str);
+      }
+
+      // Send message
+      result = SendTaskMessage(&msg);
+      // Save ID
+      id = msg.id;
+    }
+    else
+    {
+      result = Result::ERR_CANNOT_EXECUTE;
+    }
+  }
+
+  // Return result
+  return result;
+}
+
+// *****************************************************************************
+// ***   Public: ProbeAxisAwayFromWorkpiece   **********************************
+// *****************************************************************************
+Result GrblComm::ProbeAxisAwayFromWorkpiece(uint8_t axis, int32_t position, uint32_t feed_x100, uint32_t &id)
+{
+  Result result = Result::ERR_BAD_PARAMETER;
+
+  if(axis < number_of_axis)
+  {
+    // Reset axis possible only in Idle state
+    if(IsInControl() && (grbl_state == IDLE))
+    {
+      TaskQueueMsg msg;
+
+      // Set ID for command
+      msg.id = GetNextId();
+
+      // Buffers for distance and feed strings
+      char position_str[16u];
+      char feed_str[16u];
+      // Convert distance & feed values to strings. Feed passed as value * 100
+      // to keep resolution for slow feeds in inches/min(imperial system).
+      ValueToString(position_str, NumberOf(position_str), position, GetReportUnitsScaler(axis));
+      ValueToString(feed_str, NumberOf(feed_str), feed_x100, 100);
+      // Create Set Axis command
+      snprintf((char*)msg.cmd, NumberOf(msg.cmd), "G90%sG38.4%s%sF%s\r", GetMeasurementSystemGcode(), axis_str[axis], position_str, feed_str);
+
+      // Send message
+      result = SendTaskMessage(&msg);
+      // Save ID
+      id = msg.id;
+    }
+    else
+    {
+      result = Result::ERR_CANNOT_EXECUTE;
+    }
+  }
+
+  // Return result
+  return result;
+}
+
+// *****************************************************************************
+// ***   Public: SetToolLengthOffset   *****************************************
+// *****************************************************************************
+Result GrblComm::SetToolLengthOffset(int32_t offset)
+{
+  Result result = Result::ERR_BAD_PARAMETER;
+
+  // Reset axis possible only in Idle state
+  if(IsInControl() && (grbl_state == IDLE))
+  {
+    TaskQueueMsg msg;
+    // Set ID for command
+    msg.id = GetNextId();
+
+    // Buffer for distance string
+    char offset_str[16u];
+    // Convert distance value to string
+    ValueToString(offset_str, NumberOf(offset_str), offset, GetReportUnitsScaler());
+    // Create Set Axis command
+    snprintf((char*)msg.cmd, NumberOf(msg.cmd), "%sG43.1Z%s\r", GetMeasurementSystemGcode(), offset_str);
+
+    // Send message
+    result = SendTaskMessage(&msg);
+  }
+  else
+  {
+    result = Result::ERR_CANNOT_EXECUTE;
+  }
+
+  // Return result
+  return result;
+}
+
+// *****************************************************************************
+// ***   Public: ClearToolLengthOffset   ***************************************
+// *****************************************************************************
+Result GrblComm::ClearToolLengthOffset()
+{
+  Result result = Result::ERR_BAD_PARAMETER;
+
+  // Reset axis possible only in Idle state
+  if(IsInControl() && (grbl_state == IDLE))
+  {
+    TaskQueueMsg msg;
+    // Set ID for command
+    msg.id = GetNextId();
+    // Create Set Axis command
+    snprintf((char*)msg.cmd, NumberOf(msg.cmd), "G49\r");
+    // Send message
+    result = SendTaskMessage(&msg);
+  }
+  else
+  {
+    result = Result::ERR_CANNOT_EXECUTE;
+  }
+
+  // Return result
+  return result;
+}
+
+// *****************************************************************************
+// ***   Public: SetSpindleSpeed   *********************************************
+// *****************************************************************************
+Result GrblComm::SetSpindleSpeed(int32_t speed, bool dir_ccw)
+{
+  Result result = Result::ERR_BAD_PARAMETER;
+
+  // Reset axis possible only in Idle state
+  if(IsInControl() && (grbl_state == IDLE))
+  {
+    TaskQueueMsg msg;
+    // Set ID for command
+    msg.id = GetNextId();
+
+    // Negative speed is invalid - clamp it to zero
+    if(speed < 0) speed = 0;
+    // Create spindle run command
+    snprintf((char*)msg.cmd, NumberOf(msg.cmd), "%sS%ld\r", dir_ccw ? "M4" : "M3", speed);
+
+    // Send message
+    result = SendTaskMessage(&msg);
+  }
+  else
+  {
+    result = Result::ERR_CANNOT_EXECUTE;
+  }
+
+  // Return result
+  return result;
+}
+
+// *****************************************************************************
+// ***   Public: SetSpindleDirection   *****************************************
+// *****************************************************************************
+Result GrblComm::SetSpindleDirection(bool dir_ccw)
+{
+  Result result = Result::ERR_BAD_PARAMETER;
+
+  // Reset axis possible only in Idle state
+  if(IsInControl() && (grbl_state == IDLE))
+  {
+    // If spindle is running
+    if(IsSpindleRunning())
+    {
+      // Update actual speed
+      result = SetSpindleSpeed(GetSpindleSpeed(), dir_ccw);
+    }
+    else
+    {
+      // Otherwise update flag only
+      spindle_ccw = dir_ccw;
+    }
+  }
+  else
+  {
+    result = Result::ERR_CANNOT_EXECUTE;
+  }
+
+  // Return result
+  return result;
+}
+
+// *****************************************************************************
+// ***   Public: StopSpindle   *************************************************
+// *****************************************************************************
+Result GrblComm::StopSpindle()
+{
+  Result result = Result::ERR_BAD_PARAMETER;
+
+  // Reset axis possible only in Idle state
+  if(IsInControl() && (grbl_state == IDLE))
+  {
+    TaskQueueMsg msg;
+    // Set ID for command
+    msg.id = GetNextId();
+
+    // Create spindle stop
+    snprintf((char*)msg.cmd, NumberOf(msg.cmd), "M5\r");
+
+    // Send message
+    result = SendTaskMessage(&msg);
+  }
+  else
+  {
+    result = Result::ERR_CANNOT_EXECUTE;
+  }
+
+  // Return result
+  return result;
+}
+
+// *****************************************************************************
+// ***   Public: ValueToString function   **************************************
+// *****************************************************************************
+char* GrblComm::ValueToString(char* buf, uint32_t buf_size, int32_t val, int32_t scaler)
+{
+  // Find sign: sign should be handled separately, because it will be lost
+  // for values less than scaler.
+  bool is_negative = val < 0;
+  // We can't turn max negative number to equivalent positive, so add one to make it possivle!
+  if(val == INT32_MIN) val++;
+  // Remove sign from number
+  if(is_negative) val = -val;
+
+  // Check scaler and use appropriate format
+  if(scaler == 10000)
+  {
+    snprintf(buf, buf_size, "%s%ld.%04ld", is_negative ? "-" : "", val / scaler, val % scaler);
+  }
+  else if(scaler == 1000)
+  {
+    snprintf(buf, buf_size, "%s%ld.%03ld", is_negative ? "-" : "", val / scaler, val % scaler);
+  }
+  else if(scaler == 100)
+  {
+    snprintf(buf, buf_size, "%s%ld.%02ld", is_negative ? "-" : "", val / scaler, val % scaler);
+  }
+  else if(scaler == 10)
+  {
+    snprintf(buf, buf_size, "%s%ld.%01ld", is_negative ? "-" : "", val / scaler, val % scaler);
+  }
+  else
+  {
+    snprintf(buf, buf_size, "%s%ld", is_negative ? "-" : "", val);
+  }
+
+  return buf;
+}
+
+// *****************************************************************************
+// ***   Public: ValueToStringWithUnits function   *****************************
+// *****************************************************************************
+char* GrblComm::ValueToStringWithUnits(char* buf, uint32_t buf_size, int32_t val, int32_t scaler, const char* units, bool truncate)
+{
+  // Create numeric string
+  ValueToString(buf, buf_size, val, scaler);
+
+  // If truncate requested - remove trailing zeros after point
+  if(truncate && (scaler > 1))
+  {
+    // Find the decimal point: only fractional zeros after it may be trimmed,
+    // trimming past it would eat integer digits(e.g. "10.000" -> "1").
+    char* point = strchr(buf, '.');
+    // Trim only if the number has a fractional part
+    if(point != nullptr)
+    {
+      // Index of the last character. String isn't empty since point is found.
+      uint32_t len = strlen(buf) - 1u;
+      // Replace trailing zeros with null-terminator, but not beyond the point
+      while((&buf[len] > point) && (buf[len] == '0'))
+      {
+        buf[len] = '\0';
+        len--;
+      }
+      // If the whole fractional part was trimmed - remove the point as well
+      if(&buf[len] == point)
+      {
+        buf[len] = '\0';
+      }
+    }
+  }
+
+  // Check units pointer
+  if(units != nullptr)
+  {
+    // Get string length
+    uint32_t len = strlen(buf);
+    // Add units to the string
+    snprintf(buf + len, buf_size - len, "%s%s", " ", units);
+  }
+
+  return buf;
+}
+
+// *****************************************************************************
+// ***   Private: ParseState function   ****************************************
+// *****************************************************************************
+bool GrblComm::ParseState(char *data)
+{
+  uint8_t state = 0u;
+  uint8_t substate = 0u;
+  bool changed = false;
+  char *s = strchr(data, ':');
+
+  // If substate exist
+  if(s)
+  {
+    // Replace ':' with null-terminator
+    *s++ = '\0';
+    // And convert substate to number
+    substate = atoi(s);
+  }
+
+  // Check all sates
+  while((state < STATE_CNT) && strcmp(data, grbl_state_str[state]))
+  {
+    state++;
+  }
+
+  // If state isn't found - set it to Unknown
+  if(state >= STATE_CNT)
+  {
+    state = UNKNOWN;
+  }
+
+  // If state found and changed
+  if((state < STATE_CNT) && ((grbl_state != state) || (grbl_substate != substate)))
+  {
+    // If previous state was UNKNOWN, set flag to request controller settings
+    if(grbl_state == UNKNOWN)
+    {
+      request_settings = true;
+    }
+
+    // Save new state and set changed flag
+    grbl_state = (state_t)state;
+    grbl_substate = substate;
+    changed = true;
+  }
+
+  return changed;
+}
+
+// *****************************************************************************
+// ***   Private: ParseDecimal function   **************************************
+// *****************************************************************************
+bool GrblComm::ParseDecimal(float& value, char* data)
+{
+  // Result flag = false by default in case of nullptr
+  bool changed = false;
+  // Check if null pointer passed
+  if(data != nullptr)
+  {
+    // Convert float from string
+    float val = (float)atof(data);
+    // Check if it changed
+    changed = (val != value);
+    // If changed - set new value
+    if(changed) value = val;
+  }
+  // Return status
+  return changed;
+}
+
+// *****************************************************************************
+// ***   Private: ParseInt function   ******************************************
+// *****************************************************************************
+bool GrblComm::ParseInt(int32_t& value, char* data)
+{
+  // Result flag = false by default in case of nullptr
+  bool changed = false;
+  // Check if null pointer passed
+  if(data != nullptr)
+  {
+    // Convert int from string
+    int32_t val = (int32_t)atoi(data);
+    // Check if it changed
+    changed = (val != value);
+    // If changed - set new value
+    if(changed) value = val;
+  }
+  // Return status
+  return changed;
+}
+
+// *****************************************************************************
+// ***   Private: ParseSettings function   *************************************
+// *****************************************************************************
+void GrblComm::ParseSettings(char* data)
+{
+  char *s = strchr(data, '=');
+  // If  '=' sign found
+  if(s)
+  {
+    // Replace '=' with null-terminator
+    *s++ = '\0';
+
+    // Find settings number
+    uint32_t setting_num = atoi(&data[1]);
+
+    // Find setting and store it
+    switch(setting_num)
+    {
+      // ***********************************************************************
+      case 10:
+        if(status_report_options != (uint32_t)atol(s))
+        {
+          status_report_options = atol(s);
+          settings_changed = true;
+        }
+        break;
+
+      // ***********************************************************************
+      case 13:
+        if(measurement_system != atoi(s))
+        {
+          measurement_system = atoi(s);
+          settings_changed = true;
+        }
+        break;
+
+      // ***********************************************************************
+      case 22:
+        if(homing != atoi(s))
+        {
+          homing = atoi(s);
+          settings_changed = true;
+        }
+        break;
+
+      // ***********************************************************************
+      case 110:
+      case 111:
+      case 112:
+      case 113:
+      case 114:
+      case 115:
+        // Maximum rate for the axis. Settings are always metric(mm/min for
+        // linear and degrees/min for rotary axes). No settings_changed flag:
+        // screens don't have to be reinitialized because of it.
+        ParseDecimal(axis_max_feed[setting_num - 110u], s);
+        break;
+
+      // ***********************************************************************
+      case 30:
+        if(spindle_speed_max != atol(s))
+        {
+          spindle_speed_max = atol(s);
+          settings_changed = true;
+        }
+        break;
+
+      // ***********************************************************************
+      case 31:
+        if(spindle_speed_min != atol(s))
+        {
+          spindle_speed_min = atol(s);
+          settings_changed = true;
+        }
+        break;
+
+      // ***********************************************************************
+      case 32:
+        if(mode_of_operation != atoi(s))
+        {
+          mode_of_operation = atoi(s);
+          settings_changed = true;
+        }
+        break;
+
+      // ***********************************************************************
+      case 376:
+        if(rotary_axis_mask != atoi(s))
+        {
+          rotary_axis_mask = atoi(s);
+          settings_changed = true;
+        }
+        break;
+
+      // ***********************************************************************
+      default:
+        break;
+    }
+  }
+}
+
+// *****************************************************************************
+// ***   Private: ParseAxisData function   *************************************
+// *****************************************************************************
+bool GrblComm::ParseAxisData(char* data, float (&axis)[AXIS_CNT])
+{
+  bool changed = false;
+
+  // Cycle for all axis
+  for(int32_t i = 0u; i < number_of_axis; i++)
+  {
+    // Parse probe value
+    if(ParseDecimal(axis[i], data)) changed = true;
+
+    // Find next comma
+    char* next = strchr(data, ',');
+    // If it found
+    if(next)
+    {
+      // Update data pointer to next after comma character
+      data = next + 1u;
+    }
+    else // No more comma found
+    {
+      break; // the cycle
+    }
+  }
+
+  return changed;
+}
+
+// *****************************************************************************
+// ***   Private: ParseOffsets function   **************************************
+// *****************************************************************************
+void GrblComm::ParseOffsets(char* data)
+{
+  grbl_changed.offset = ParseAxisData(data, grbl_offset);
+  grbl_changed.await_wco_ok = grbl_awaitWCO;
+}
+
+// *****************************************************************************
+// ***   Private: ParseOverrides function   ************************************
+// *****************************************************************************
+void GrblComm::ParseOverrides(char* data)
+{
+  // Pointers array
+  char* value_ptr[3u] = {0};
+
+  // Set first pointer
+  value_ptr[0u] = data;
+  // Fill remaining pointers
+  for(uint32_t i = 1u; (i < NumberOf(value_ptr)) && (data != nullptr); i++)
+  {
+    // Find next comma
+    data = strchr(data, ',');
+    // Malformed field - bail out to avoid null dereference
+    if(data != nullptr)
+    {
+      // And replace it with zero, after which advance pointer
+      *data++ = '\0';
+      // Store pointer to next value in array
+      value_ptr[i] = data;
+    }
+  }
+
+  // ParseInt check for nullptr, so can be called even if data only partially there
+  if(ParseInt(grbl_feed_override, value_ptr[0u])) grbl_changed.feed_override = true;
+  if(ParseInt(grbl_rapid_override, value_ptr[1u])) grbl_changed.rapid_override = true;
+  if(ParseInt(spindle_rpm_override, value_ptr[2u])) grbl_changed.rpm_override = true;
+}
+
+// *****************************************************************************
+// ***   Private: ParseFeedSpeed function   ************************************
+// *****************************************************************************
+void GrblComm::ParseFeedSpeed(char* data)
+{
+  // Pointers array
+  char* value_ptr[3u] = {0};
+
+  // Set first pointer
+  value_ptr[0u] = data;
+  // Fill remaining pointers
+  for(uint32_t i = 1u; (i < NumberOf(value_ptr)) && (data != nullptr); i++)
+  {
+    // Find next comma
+    data = strchr(data, ',');
+    // Malformed field - bail out to avoid null dereference
+    if(data != nullptr)
+    {
+      // And replace it with zero, after which advance pointer
+      *data++ = '\0';
+      // Store pointer to next value in array
+      value_ptr[i] = data;
+    }
+  }
+
+  // ParseDecimal check for nullptr, so can be called even if data only partially there
+  if(ParseDecimal(grbl_feed_rate, value_ptr[0u])) grbl_changed.feed = true;
+  if(ParseDecimal(spindle_rpm_programmed, value_ptr[1u])) grbl_changed.rpm = true;
+  if(ParseDecimal(spindle_rpm_actual, value_ptr[2u])) grbl_changed.rpm_actual = true;
+  // No actual speed in data - set actual RPM to zero
+  if((value_ptr[2u] == nullptr) && (spindle_rpm_actual != 0.0f))
+  {
+    spindle_rpm_actual = 0.0f;
+    // Set changed flag so UI can update displayed value
+    grbl_changed.rpm_actual = true;
+  }
+}
+
+// *****************************************************************************
+// ***   Private: ParseData function   *****************************************
+// *****************************************************************************
+void GrblComm::ParseData(void)
+{
+  uint32_t c;
+  bool pins = true;
+  char* line = (char*)&rx_buf[0];
+
+  // Check "ok" response
+  if(!strcmp((char*)rx_buf, "ok"))
+  {
+    // Save cmd response timestamp
+    cmd_rx_timestamp = RtosTick::GetTimeMs();
+    respond_pending = false;
+    grbl_status = Status_OK;
+    return;
+  }
+
+  // Parse status
+  if(line[0] == '<')
+  {
+    // Set status received flag
+    status_received = true;
+    // Set timestamp when status was received
+    status_rx_timestamp = RtosTick::GetTimeMs();
+
+    pins = false;
+    line = strtok(&line[1], "|");
+
+    if(line)
+    {
+      if(ParseState(line))
+      {
+        grbl_changed.state = true;
+//        if(!(grbl_state == ALARM || grbl_state == TOOL) && grbl_message[0] != '\0') grblClearMessage();
+      }
+      if(grbl_alarm && grbl_state != ALARM)
+      {
+        grbl_alarm = 0u;
+        grbl_changed.alarm = false;
+      }
+      line = strtok(NULL, "|");
+    }
+
+    while(line)
+    {
+      if(!strncmp(line, "WPos:", 5))
+      {
+        if(!grbl_useWPos)
+        {
+          grbl_useWPos = true;
+          grbl_changed.offset = true;
+        }
+        grbl_changed.pos = ParseAxisData(line + 5, grbl_position);
+      }
+      else if(!strncmp(line, "MPos:", 5))
+      {
+        if(grbl_useWPos)
+        {
+          grbl_useWPos = false;
+          grbl_changed.offset = true;
+        }
+        grbl_changed.pos = ParseAxisData(line + 5, grbl_position);
+      }
+      else if(!strncmp(line, "FS:", 3))
+      {
+        ParseFeedSpeed(line + 3);
+      }
+      else if(!strncmp(line, "F:", 2))
+      {
+        // Builds without spindle report bare feed value instead of FS:
+        if(ParseDecimal(grbl_feed_rate, line + 2)) grbl_changed.feed = true;
+      }
+      else if(!strncmp(line, "WCO:", 4))
+      {
+        ParseOffsets(line + 4);
+      }
+      else if(!strncmp(line, "Pn:", 3))
+      {
+        // Pins received
+        pins = true;
+        // Probe temporary flag
+        bool probe_triggered = false;
+        // Copy and check pins
+        for(uint32_t i = 0u; i < NumberOf(grbl_pins); i++)
+        {
+          // Check if sting changed and set flag
+          if(grbl_pins[i] != line[3 + i]) grbl_changed.pins = true;
+          // Terminate string
+          grbl_pins[i] = '\0';
+          // If we reach end of sting or closing bracket - break the cycle
+          if((line[3 + i] == '\0') || (line[3 + i] == '>')) break;
+          // Copy character
+          grbl_pins[i] = line[3 + i];
+          // Check probe and set local flag
+          if((grbl_pins[i] == 'P') || (grbl_pins[i] == 'p')) probe_triggered = true;
+        }
+        // If string longer than buffer - terminate it
+        grbl_pins[NumberOf(grbl_pins) - 1u] = '\0';
+        // Set probe flag
+        grbl_probe_triggered = probe_triggered;
+      }
+      else if(!strncmp(line, "D:", 2))
+      {
+        grbl_xModeDiameter = line[2] == '1';
+        grbl_changed.xmode = true;
+      }
+      else if(!strncmp(line, "A:", 2))
+      {
+        line = &line[2];
+        spindle_on = coolant_flood = coolant_mist = false;
+        grbl_changed.leds = true;
+
+        while((c = *line++))
+        {
+          switch(c)
+          {
+            case 'M':
+              coolant_mist = true;
+              break;
+
+            case 'F':
+              coolant_flood = true;
+              break;
+
+            case 'S':
+              spindle_ccw = false;
+              spindle_on = true;
+              break;
+
+            case 'C':
+              spindle_ccw = true;
+              spindle_on = true;
+              break;
+          }
+        }
+      }
+      else if(!strncmp(line, "Ov:", 3)) ParseOverrides(line + 3);
+
+      else if(!strncmp(line, "MPG:", 4))
+      {
+        if(grbl_mpgMode != (line[4] == '1'))
+        {
+          grbl_mpgMode = !grbl_mpgMode;
+          grbl_changed.mpg = true;
+//          grbl_event.on_line_received = parseData;
+        }
+        grbl_received.mpg = true;
+      }
+      else if(!strncmp(line, "SD:", 3))
+      {
+//        if((grbl_changed.message = !!strcmp(grbl_message, line + 3))) strncpy(grbl_message, line + 3, 250);
+      }
+
+      line = strtok(NULL, "|");
+    }
+
+    if(!pins && (grbl_changed.pins = (grbl_pins[0] != '\0'))) grbl_pins[0] = '\0';
+
+    // Clear probe flag if no pins reported
+    if(!pins) grbl_probe_triggered = false;
+  }
+  else if(line[0] == '[')
+  {
+    if(!strncmp(&line[1], "PRB:", 4))
+    {
+      // Probe position
+      grbl_changed.probe = ParseAxisData(line + 1 + 4, grbl_probe_position);
+    }
+    else if(!strncmp(&line[1], "TLO:", 4))
+    {
+      // Tool Length Offset
+      grbl_changed.tlo = ParseAxisData(line + 1 + 4, grbl_tool_length_offset);
+    }
+    else if(!strncmp(&line[1], "AXS:", 4))
+    {
+      // Move line pointer to number of axis
+      line += 4 + 1;
+      // Parse number of axis
+      ParseInt(number_of_axis, line);
+      // Clamp to valid range: malformed input can produce negative value and
+      // controller can report more axis than supported by the pendant.
+      if(number_of_axis < 0) number_of_axis = 0;
+      if(number_of_axis > AXIS_CNT) number_of_axis = AXIS_CNT;
+
+      // Find line where axis names are
+      line = strchr(line, ':');
+      // Fill axis names only if separator found - malformed input must not fault
+      if(line != nullptr)
+      {
+        // Skip ':' character
+        line++;
+        // Fill axis names array
+        for(int32_t i = 0; i < number_of_axis; i++)
+        {
+          // Stop at end of string or closing bracket to avoid copying garbage
+          if((line[i] == '\0') || (line[i] == ']')) break;
+          axis_str[i][0] = line[i];
+        }
+      }
+    }
+    else
+    {
+      ; // Do nothing - MISRA rule
+    }
+  }
+  else if(line[0] == '$') // Parse settings
+  {
+    ParseSettings(line);
+  }
+  else if(!strncmp(line, "error:", 6))
+  {
+    // Save cmd response timestamp - error is a command response too
+    cmd_rx_timestamp = RtosTick::GetTimeMs();
+    grbl_status = (status_t)atoi(line + 6);
+    grbl_changed.error = true;
+    respond_pending = false;
+  }
+  else if(!strncmp(line, "ALARM:", 6))
+  {
+    grbl_alarm = (uint8_t)atoi(line + 6);
+    grbl_changed.alarm = true;
+  }
+  else if(!strncmp(line, "Grbl", 4)) // Welcome banner: "Grbl X.Xx [...]" or "GrblHAL X.Xx [...]"
+  {
+    // Controller (re)booted - all cached data is stale. Set state to UNKNOWN:
+    // transition out of it will trigger controller settings request.
+    grbl_state = UNKNOWN;
+    grbl_changed.state = true;
+    // MPG mode is runtime state and cleared by the controller reset
+    grbl_mpgMode = false;
+    grbl_changed.mpg = true;
+  }
+  else
+  {
+    ; // Do nothing - MISRA rule
+  }
+}
+
+// *****************************************************************************
+// ***   Private: PollSerial function   ****************************************
+// *****************************************************************************
+void GrblComm::PollSerial(void)
+{
+  uint8_t c = 0u;
+
+#if defined(SEND_DATA_TO_USB)
+  // Buffer to send data to USB. At 115200 and 1 ms timer interval we could expect ~12 bytes.
+  static uint8_t usb_data[32u] = {0};
+  // Counter
+  uint16_t rx_usb_cnt = 0u;
+#endif
+
+  while(uart->Read(c) == Result::RESULT_OK)
+  {
+    // If ASCII_CAN received or buffer is full
+    if((c == 0x18u) || (rx_char_cnt >= NumberOf(rx_buf) - 3u)) //  minus one for null-terminator, minus 2 for \n\r for USB debug
+    {
+      rx_char_cnt = 0u;
+    }
+    else if(((c == '\n') || (c == '\r'))) // Line received
+    {
+      // If we have at least one character
+      if(rx_char_cnt > 0u)
+      {
+        // End of line reached
+        rx_buf[rx_char_cnt] = '\0';
+
+        // Lock mutex before parsing data
+        mutex.Lock();
+        // Try to parse it
+        ParseData();
+        // Release mutex after parsing data
+        mutex.Release();
+      }
+      rx_char_cnt = 0u;
+    }
+    else
+    {
+      rx_buf[rx_char_cnt++] = (char)c;
+    }
+#if defined(SEND_DATA_TO_USB)
+    // Check just in case that we got less bytes than buffer size
+    if(rx_usb_cnt < NumberOf(usb_data))
+    {
+      usb_data[rx_usb_cnt++] = c;
+    }
+#endif
+  }
+
+#if defined(SEND_DATA_TO_USB)
+  // Send data only if something was received
+  if(rx_usb_cnt > 0)
+  {
+    // Send to USB
+    if(USBD_CDC_SetTxBuffer(&hUsbDeviceFS, usb_data, rx_usb_cnt) == USBD_OK)
+    {
+      // Send packet - no waiting
+      USBD_CDC_TransmitPacket(&hUsbDeviceFS);
+    }
+  }
+#endif
+}
+
+// *****************************************************************************
+// ***   Private: GetNextId function   *****************************************
+// *****************************************************************************
+uint32_t GrblComm::GetNextId(void)
+{
+  // Lock mutex before parsing data
+  mutex.Lock();
+  // get next ID
+  uint32_t nid = next_id;
+  // And increase it
+  next_id++;
+  // Check zero - isn't valid ID(I doubt any will stream 4'294'967'295 commands, but...)
+  if(next_id == 0u) next_id++;
+  // Release mutex after parsing data
+  mutex.Release();
+  // Return result
+  return nid;
+}
