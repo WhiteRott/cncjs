@@ -183,6 +183,30 @@ SD card or in littlefs" — i.e. file-resident, which doesn't fit cncjs's line-s
 model. This board *does* have SD compiled in (`[NEWOPT:ENUMS,RT+,HOME,ATC,SED,SD,YM]`), so a
 firmware update would make that path viable; the blocker is firmware age, not hardware.
 
+#### Recompiling the firmware won't fix this — the F103 is out of flash
+Checked 2026-09-07 against `grblHAL/STM32F1xx`. Building is easy (there's a
+[Web Builder](https://svn.io-engineering.com:8443/?driver=STM32F1xx), no local toolchain
+needed) but it can't deliver macros on this board:
+- **The driver's 128K-F103 support is frozen at release `20250514`** "due to lack of memory"
+  (per the driver README). `M98` needs core `20260202` — ~9 months *after* the freeze. Not a
+  config toggle.
+- Direction of travel is *removing* features to fit: builds after `20250116` dropped `G5`,
+  `G5.1` and all canned cycles from the 128K pills to save flash.
+- The C8 build target is `bluepill_f103c8_128k` — i.e. it already relies on the undocumented
+  extra flash on C8 chips, and is still out of room.
+- `NGC_EXPRESSIONS_ENABLE=On` would in principle give `#vars`, `IF`/`WHILE` and O-word subs
+  (`ngc_flowctrl.c` is gated behind that one flag — note core `config.h`'s comment claiming
+  "conditionals and subroutines are not" supported is **stale**, predating the flow-control
+  work). But flash exhaustion is exactly why the target is frozen, so enabling it is unlikely
+  to link.
+- `SDCARD_ENABLE` exists for F1xx but the plugin remaps SPI1 and **disables the JTAG/SWD
+  programming interface** on first mount (recoverable only via `$PGM` + power cycle). F1xx has
+  no `LITTLEFS_ENABLE` at all, unlike F4xx.
+
+If controller-side macros are ever genuinely wanted, it's a **hardware** change, not a build
+change: the driver README suggests STM32F3xx Blackpill as a near drop-in for F103 pills, and
+F4xx (F401/F411/F446) is where SD + littlefs + expressions comfortably fit.
+
 **This is why the probing cycles compute points in JS server-side and stream plain
 `G0`/`G38.2`, reacting to `PRB:` reports** — not an oversight. Note the user's reference doc
 `~/Documents/cnc/Probing cycles` confidently describes all of the above as available; its
